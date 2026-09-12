@@ -2,14 +2,7 @@ import { Alert, Share } from 'react-native';
 import { VN } from '@/types/vn';
 import { checkAudioFileExists } from './fileService';
 
-// Safely resolve expo-sharing with fallback to React Native core Share
-let ExpoSharing: typeof import('expo-sharing') | null = null;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  ExpoSharing = require('expo-sharing');
-} catch {
-  ExpoSharing = null;
-}
+import * as ExpoSharing from 'expo-sharing';
 
 export const sharingService = {
   /**
@@ -62,6 +55,40 @@ export const sharingService = {
         !err.message.includes('dismissed')
       ) {
         Alert.alert('Sharing Error', err?.message || 'Failed to open share sheet.');
+      }
+      return false;
+    }
+  },
+
+  /**
+   * Shares an arbitrary file (such as an .ovp package) via Android share sheet.
+   */
+  async shareFile(fileUri: string, dialogTitle: string, mimeType = 'application/octet-stream'): Promise<boolean> {
+    try {
+      if (ExpoSharing && typeof ExpoSharing.isAvailableAsync === 'function') {
+        const isAvailable = await ExpoSharing.isAvailableAsync();
+        if (isAvailable) {
+          await ExpoSharing.shareAsync(fileUri, {
+            mimeType,
+            dialogTitle,
+          });
+          return true;
+        }
+      }
+
+      await Share.share({
+        title: dialogTitle,
+        url: fileUri,
+      });
+      return true;
+    } catch (err: any) {
+      if (
+        err?.message &&
+        !err.message.includes('User did not share') &&
+        !err.message.includes('canceled') &&
+        !err.message.includes('dismissed')
+      ) {
+        Alert.alert('Sharing Error', err?.message || 'Failed to share file.');
       }
       return false;
     }

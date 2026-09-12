@@ -26,7 +26,9 @@ import Animated, {
 
 import { vnRepository } from '@/database/repositories/vnRepository';
 import { albumRepository } from '@/database/repositories/albumRepository';
+import { recentlyPlayedRepository } from '@/database/repositories/recentlyPlayedRepository';
 import { vnService } from '@/services/vnService';
+import { packageService } from '@/services/packageService';
 import { VN } from '@/types/vn';
 import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
@@ -49,10 +51,12 @@ export default function LibraryScreen() {
 
   const [vns, setVns] = useState<VN[]>([]);
   const [albumCount, setAlbumCount] = useState(0);
+  const [recentCount, setRecentCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState<boolean | null>(null);
   const [userName, setUserName] = useState<string>('');
   const [importing, setImporting] = useState(false);
+  const [importingPackage, setImportingPackage] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [albumModalVn, setAlbumModalVn] = useState<VN | null>(null);
 
@@ -62,7 +66,7 @@ export default function LibraryScreen() {
 
   const [selectedTab, setSelectedTab] = useState<'all' | 'recorded' | 'imported'>('all');
 
-  const { currentVn, isPlaying, playVn, pause, resume, updateCurrentVnMetadata } = useAudio();
+  const { currentVn, isPlaying, playVn, pause, resume, updateCurrentVnMetadata, shuffleAll } = useAudio();
   const router = useRouter();
 
   // Shake & interaction guards
@@ -89,8 +93,10 @@ export default function LibraryScreen() {
     try {
       const vnData = await vnRepository.getAllVns();
       const albums = await albumRepository.getAllAlbums();
+      const recents = await recentlyPlayedRepository.getRecentlyPlayed();
       setVns(vnData);
       setAlbumCount(albums.length);
+      setRecentCount(recents.length);
     } catch (err: any) {
       console.warn('Error loading library data:', err);
     } finally {
@@ -279,6 +285,22 @@ export default function LibraryScreen() {
     }
   };
 
+  const handleShuffleAllMain = () => {
+    if (filteredVns.length > 0) {
+      const ctx: PlaybackContext = {
+        type: 'all',
+        title:
+          selectedTab === 'recorded'
+            ? 'Recorded Keepsakes'
+            : selectedTab === 'imported'
+            ? 'Imported Songs'
+            : 'All Voice Notes',
+        items: filteredVns,
+      };
+      shuffleAll(filteredVns, ctx);
+    }
+  };
+
   async function handleTogglePin(vn: VN) {
     const nextState = !vn.isPinned;
     setVns((prev) =>
@@ -291,7 +313,7 @@ export default function LibraryScreen() {
       await vnRepository.togglePin(vn.id, nextState);
       DeviceEventEmitter.emit('library_updated');
       teddyReactionService.trigger(nextState ? 'PIN' : 'UNPIN');
-    } catch (err) {
+    } catch {
       setVns((prev) =>
         prev.map((item) => (item.id === vn.id ? { ...item, isPinned: !nextState } : item))
       );
@@ -322,6 +344,30 @@ export default function LibraryScreen() {
     }
   }
 
+  async function handleImportPackage() {
+    if (importingPackage) return;
+    setImportingPackage(true);
+    try {
+      const result = await packageService.pickAndImportPackage();
+      if (result && result.album) {
+        teddyReactionService.trigger('CUSTOM', `Imported "${result.album.name}" package! 📦✨`);
+        Alert.alert(
+          'Package Imported! 📦🎉',
+          `Album "${result.album.name}" with ${result.importedCount} track(s) has been imported to your library.`,
+          [
+            { text: 'View Album', onPress: () => router.push(`/album/${result.album.id}` as any) },
+            { text: 'OK', style: 'default' },
+          ]
+        );
+        await loadData();
+      }
+    } catch (err: any) {
+      Alert.alert('Import Failed', err?.message || 'An error occurred while importing package.');
+    } finally {
+      setImportingPackage(false);
+    }
+  }
+
   async function handleToggleLike(vn: VN) {
     const nextState = !vn.isLiked;
     // Optimistic UI update
@@ -335,7 +381,7 @@ export default function LibraryScreen() {
       await vnRepository.toggleLike(vn.id, nextState);
       DeviceEventEmitter.emit('library_updated');
       teddyReactionService.trigger(nextState ? 'LIKE' : 'UNLIKE');
-    } catch (err) {
+    } catch {
       // Revert on failure
       setVns((prev) =>
         prev.map((item) => (item.id === vn.id ? { ...item, isLiked: !nextState } : item))
@@ -725,6 +771,54 @@ export default function LibraryScreen() {
                       </Text>
                     </Pressable>
                   </View>
+
+                  {/* Row 3: Recently Played & Import Package */}
+                  <View style={[styles.cozyNavRow, { marginTop: 10 }]}>
+                    {/* Recently Played Card */}
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.cozyCard,
+                        { backgroundColor: teddy.card, borderColor: teddy.border },
+                        pressed && { opacity: 0.8, transform: [{ scale: 0.98 }] },
+                      ]}
+                      onPress={() => router.push('/recent' as any)}>
+                      <View style={styles.cozyCardTop}>
+                        <View style={[styles.cozyIconCircle, { backgroundColor: '#EDE9FE' }]}>
+                          <Ionicons name="time" size={20} color="#7C3AED" />
+                        </View>
+                        <Ionicons name="chevron-forward" size={16} color={teddy.textTertiary} />
+                      </View>
+                      <Text style={[styles.cozyCardTitle, { color: teddy.text }]}>Recently Played 🕒</Text>
+                      <Text style={[styles.cozyCardCount, { color: teddy.textSecondary }]}>
+                        {recentCount} {recentCount === 1 ? 'track' : 'tracks'}
+                      </Text>
+                    </Pressable>
+
+                    {/* Import Package Card */}
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.cozyCard,
+                        { backgroundColor: teddy.card, borderColor: teddy.border },
+                        pressed && { opacity: 0.8, transform: [{ scale: 0.98 }] },
+                      ]}
+                      disabled={importingPackage}
+                      onPress={handleImportPackage}>
+                      <View style={styles.cozyCardTop}>
+                        <View style={[styles.cozyIconCircle, { backgroundColor: '#ECFDF5' }]}>
+                          <Ionicons name="archive" size={20} color="#059669" />
+                        </View>
+                        {importingPackage ? (
+                          <ActivityIndicator size="small" color={teddy.primary} />
+                        ) : (
+                          <Ionicons name="chevron-forward" size={16} color={teddy.textTertiary} />
+                        )}
+                      </View>
+                      <Text style={[styles.cozyCardTitle, { color: teddy.text }]}>Import .ovp 📦</Text>
+                      <Text style={[styles.cozyCardCount, { color: teddy.textSecondary }]}>
+                        {importingPackage ? 'Importing...' : 'Restore / Share'}
+                      </Text>
+                    </Pressable>
+                  </View>
                 </View>
 
                 {/* Teddy's Pick Card */}
@@ -819,7 +913,7 @@ export default function LibraryScreen() {
                   </Pressable>
                 </View>
 
-                {/* Section Header with Play All */}
+                {/* Section Header with Shuffle & Play All */}
                 <View style={[styles.sectionHeader, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
                   <Text style={[styles.sectionTitle, { color: teddy.textSecondary }]}>
                     {selectedTab === 'all'
@@ -829,13 +923,22 @@ export default function LibraryScreen() {
                       : '🎵 IMPORTED FROM DEVICE'}
                   </Text>
                   {filteredVns.length > 0 && (
-                    <Pressable
-                      style={styles.playAllPill}
-                      hitSlop={8}
-                      onPress={handlePlayAllMain}>
-                      <Ionicons name="play" size={12} color={teddy.primary} />
-                      <Text style={[styles.playAllPillText, { color: teddy.primary }]}>Play All</Text>
-                    </Pressable>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Pressable
+                        style={styles.playAllPill}
+                        hitSlop={8}
+                        onPress={handleShuffleAllMain}>
+                        <Ionicons name="shuffle" size={12} color={teddy.primary} />
+                        <Text style={[styles.playAllPillText, { color: teddy.primary }]}>Shuffle</Text>
+                      </Pressable>
+                      <Pressable
+                        style={styles.playAllPill}
+                        hitSlop={8}
+                        onPress={handlePlayAllMain}>
+                        <Ionicons name="play" size={12} color={teddy.primary} />
+                        <Text style={[styles.playAllPillText, { color: teddy.primary }]}>Play All</Text>
+                      </Pressable>
+                    </View>
                   )}
                 </View>
               </View>

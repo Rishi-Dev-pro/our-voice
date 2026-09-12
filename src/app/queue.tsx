@@ -26,6 +26,8 @@ export default function QueueScreen() {
     manualQueue,
     playbackContext,
     repeatMode,
+    isShuffle,
+    shuffledOrder,
     removeFromQueue,
     clearQueue,
     moveQueueItem,
@@ -53,13 +55,32 @@ export default function QueueScreen() {
       return items;
     }
 
+    // When Shuffle is active and we have the shuffled order for this context
+    if (isShuffle && shuffledOrder && shuffledOrder.length === items.length) {
+      const pointer = shuffledOrder.indexOf(currentIndex);
+      if (pointer !== -1) {
+        const afterPointer = shuffledOrder
+          .slice(pointer + 1)
+          .map((idx) => items[idx])
+          .filter(Boolean);
+        if (repeatMode === 'all') {
+          const beforePointer = shuffledOrder
+            .slice(0, pointer)
+            .map((idx) => items[idx])
+            .filter(Boolean);
+          return [...afterPointer, ...beforePointer];
+        }
+        return afterPointer;
+      }
+    }
+
     const afterCurrent = items.slice(currentIndex + 1);
     if (repeatMode === 'all') {
       const beforeCurrent = items.slice(0, currentIndex);
       return [...afterCurrent, ...beforeCurrent];
     }
     return afterCurrent;
-  }, [playbackContext, currentVn?.id, repeatMode]);
+  }, [playbackContext, currentVn?.id, repeatMode, isShuffle, shuffledOrder]);
 
   const activeDuration = duration || currentVn?.duration || 0;
 
@@ -228,7 +249,7 @@ export default function QueueScreen() {
                 CONTINUING FROM {playbackContext?.title?.toUpperCase() || 'ALL SONGS'}
               </Text>
               <Text style={[styles.repeatStatusText, { color: theme.textTertiary }]}>
-                Repeat: {repeatMode.toUpperCase()}
+                {isShuffle ? 'SHUFFLE • ' : ''}Repeat: {repeatMode.toUpperCase()}
               </Text>
             </View>
 

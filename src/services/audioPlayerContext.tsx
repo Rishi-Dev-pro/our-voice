@@ -3,6 +3,7 @@ import { Alert, DeviceEventEmitter } from 'react-native';
 import { AudioPlayer, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import { VN } from '@/types/vn';
 import { vnRepository } from '@/database/repositories/vnRepository';
+import { recentlyPlayedRepository } from '@/database/repositories/recentlyPlayedRepository';
 import { checkAudioFileExists } from './fileService';
 
 export type SleepTimerOption = 'off' | '5m' | '10m' | '15m' | '30m' | '60m' | 'end_of_vn';
@@ -21,7 +22,7 @@ export const SUPPORTED_SPEEDS = [0.75, 1.0, 1.25, 1.5, 2.0] as const;
 export type PlaybackSpeed = (typeof SUPPORTED_SPEEDS)[number];
 
 export type RepeatMode = 'off' | 'all' | 'one';
-export type PlaybackContextType = 'album' | 'liked' | 'pinned' | 'all' | 'search';
+export type PlaybackContextType = 'album' | 'liked' | 'pinned' | 'all' | 'recent' | 'search';
 
 export interface PlaybackContext {
   type: PlaybackContextType;
@@ -37,6 +38,8 @@ interface AudioContextType {
   duration: number;
   isLooping: boolean;
   repeatMode: RepeatMode;
+  isShuffle: boolean;
+  shuffledOrder: number[];
   playbackRate: PlaybackSpeed;
   sleepTimerType: SleepTimerOption;
   sleepTimerRemaining: number | null;
@@ -49,6 +52,9 @@ interface AudioContextType {
   toggleLoop: () => void;
   setRepeatMode: (mode: RepeatMode) => void;
   cycleRepeatMode: () => void;
+  toggleShuffle: () => void;
+  shuffleAll: (allVns?: VN[], customContext?: PlaybackContext) => Promise<void>;
+  addAlbumToQueue: (vns: VN[]) => { success: boolean; addedCount: number };
   setPlaybackRate: (rate: PlaybackSpeed) => void;
   setSleepTimer: (option: SleepTimerOption) => void;
   seekTo: (seconds: number) => Promise<void>;
@@ -67,12 +73,42 @@ interface AudioContextType {
 
 const AudioContext = createContext<AudioContextType | null>(null);
 
+function generateShuffledOrder(count: number, startIndex: number = 0): number[] {
+  if (count <= 1) return [0];
+  const indices = Array.from({ length: count }, (_, i) => i);
+  if (startIndex >= 0 && startIndex < count) {
+    indices.splice(startIndex, 1);
+    indices.unshift(startIndex);
+  }
+  for (let i = indices.length - 1; i > 1; i--) {
+    const j = 1 + Math.floor(Math.random() * i);
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+  return indices;
+}
+
+function generateReshuffledOrder(count: number, lastPlayedIndex: number): number[] {
+  if (count <= 1) return [0];
+  const order = Array.from({ length: count }, (_, i) => i);
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  if (order[0] === lastPlayedIndex && count > 1) {
+    const swapWith = 1 + Math.floor(Math.random() * (count - 1));
+    [order[0], order[swapWith]] = [order[swapWith], order[0]];
+  }
+  return order;
+}
+
 export function AudioPlayerProvider({ children }: { children: React.ReactNode }) {
   const [currentVn, setCurrentVn] = useState<VN | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [repeatMode, setRepeatModeState] = useState<RepeatMode>('all');
+  const [isShuffle, setIsShuffle] = useState(false);
+  const [shuffledOrder, setShuffledOrder] = useState<number[]>([]);
   const [playbackRate, setPlaybackRateState] = useState<PlaybackSpeed>(1.0);
   const [sleepTimerType, setSleepTimerType] = useState<SleepTimerOption>('off');
   const [sleepTimerRemaining, setSleepTimerRemaining] = useState<number | null>(null);
@@ -87,6 +123,13 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
 
   const repeatModeRef = useRef<RepeatMode>('all');
   repeatModeRef.current = repeatMode;
+
+  const isShuffleRef = useRef(false);
+  isShuffleRef.current = isShuffle;
+
+  const shuffledOrderRef = useRef<number[]>([]);
+  const shufflePointerRef = useRef(0);
+  const recordedRecentForTrackRef = useRef<string | null>(null);
 
   const isLooping = repeatMode === 'one';
   const isLoopingRef = useRef(false);
@@ -171,6 +214,9 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     }
     if (playerRef.current) {
       try {
+        playerRef.current.clearLockScreenControls();
+      } catch {}
+      try {
         playerRef.current.pause();
         playerRef.current.remove();
       } catch (e) {
@@ -196,6 +242,13 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
           }
         : null
     );
+    try {
+      playerRef.current?.updateLockScreenMetadata({
+        title: updates.title || currentVnRef.current?.title || 'Voice Note',
+        artist: 'Our Voice',
+        albumTitle: playbackContextRef.current?.title || 'Our Voice',
+      });
+    } catch {}
   };
 
   const stopIfPlaying = (vnId: string) => {
@@ -297,9 +350,91 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     }, 1000);
   };
 
+  const toggleShuffle = () => {
+    const nextState = !isShuffle;
+    setIsShuffle(nextState);
+    isShuffleRef.current = nextState;
+
+    if (nextState && playbackContextRef.current && playbackContextRef.current.items.length > 0) {
+      const items = playbackContextRef.current.items;
+      const currentId = currentVnRef.current?.id;
+      const startIdx = currentId ? items.findIndex((v) => v.id === currentId) : 0;
+      const order = generateShuffledOrder(items.length, startIdx >= 0 ? startIdx : 0);
+      shuffledOrderRef.current = order;
+      setShuffledOrder(order);
+      shufflePointerRef.current = 0;
+    }
+  };
+
   const setPlaybackContext = (context: PlaybackContext) => {
     setPlaybackContextState(context);
     playbackContextRef.current = context;
+    if (isShuffleRef.current && context.items.length > 0) {
+      const currentId = currentVnRef.current?.id;
+      const startIdx = currentId ? context.items.findIndex((v) => v.id === currentId) : 0;
+      const order = generateShuffledOrder(context.items.length, startIdx >= 0 ? startIdx : 0);
+      shuffledOrderRef.current = order;
+      setShuffledOrder(order);
+      shufflePointerRef.current = 0;
+    }
+  };
+
+  const shuffleAll = async (allVns?: VN[], customContext?: PlaybackContext) => {
+    let list = allVns;
+    if (!list || list.length === 0) {
+      try {
+        list = await vnRepository.getAllVns();
+      } catch (err) {
+        console.warn('Error fetching all VNs for shuffleAll:', err);
+      }
+    }
+    if (!list || list.length === 0) {
+      Alert.alert('No Recordings', 'There are no recordings in your library to shuffle.');
+      return;
+    }
+
+    // Filter to only items with local files present
+    const validList = list.filter((item) => checkAudioFileExists(item.fileUri));
+    if (validList.length === 0) {
+      Alert.alert('No Files Available', 'Could not find local audio files for library recordings.');
+      return;
+    }
+
+    const shuffled = [...validList];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+
+    const newContext: PlaybackContext = customContext
+      ? { ...customContext, items: shuffled }
+      : {
+          type: 'all',
+          title: 'All Voice Notes',
+          items: shuffled,
+        };
+
+    setIsShuffle(true);
+    isShuffleRef.current = true;
+    const order = Array.from({ length: shuffled.length }, (_, i) => i);
+    shuffledOrderRef.current = order;
+    setShuffledOrder(order);
+    shufflePointerRef.current = 0;
+
+    await playInternal(shuffled[0], 0, newContext);
+  };
+
+  const addAlbumToQueue = (vns: VN[]): { success: boolean; addedCount: number } => {
+    if (!vns || vns.length === 0) {
+      return { success: false, addedCount: 0 };
+    }
+    const existingQueueIds = new Set(manualQueueRef.current.map((v) => v.id));
+    const toAdd = vns.filter((v) => !existingQueueIds.has(v.id));
+    if (toAdd.length === 0) {
+      return { success: false, addedCount: 0 };
+    }
+    setManualQueue((prev) => [...prev, ...toAdd]);
+    return { success: true, addedCount: toAdd.length };
   };
 
   const addToQueue = (vn: VN): { success: boolean; message: string } => {
@@ -343,6 +478,13 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     if (newContext) {
       setPlaybackContextState(newContext);
       playbackContextRef.current = newContext;
+      if (isShuffleRef.current && newContext.items.length > 0) {
+        const startIdx = newContext.items.findIndex((v) => v.id === vn.id);
+        const order = generateShuffledOrder(newContext.items.length, startIdx >= 0 ? startIdx : 0);
+        shuffledOrderRef.current = order;
+        setShuffledOrder(order);
+        shufflePointerRef.current = 0;
+      }
     } else if (!playbackContextRef.current) {
       // Default to All Songs context if none is active
       try {
@@ -354,8 +496,23 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
         };
         setPlaybackContextState(defaultCtx);
         playbackContextRef.current = defaultCtx;
+        if (isShuffleRef.current && allVns.length > 0) {
+          const startIdx = allVns.findIndex((v) => v.id === vn.id);
+          const order = generateShuffledOrder(allVns.length, startIdx >= 0 ? startIdx : 0);
+          shuffledOrderRef.current = order;
+          setShuffledOrder(order);
+          shufflePointerRef.current = 0;
+        }
       } catch (err) {
         console.warn('Could not populate default playback context:', err);
+      }
+    } else if (isShuffleRef.current && playbackContextRef.current && playbackContextRef.current.items.length > 0) {
+      const trackIdx = playbackContextRef.current.items.findIndex((v) => v.id === vn.id);
+      if (trackIdx !== -1 && shuffledOrderRef.current.length > 0) {
+        const orderIdx = shuffledOrderRef.current.indexOf(trackIdx);
+        if (orderIdx !== -1) {
+          shufflePointerRef.current = orderIdx;
+        }
       }
     }
 
@@ -391,6 +548,7 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     currentTimeRef.current = initialPos;
     lastSavedPositionRef.current = initialPos;
     setDuration(vn.duration || 0);
+    recordedRecentForTrackRef.current = null;
 
     try {
       const player = createAudioPlayer({ uri: vn.fileUri }, { updateInterval: 250 });
@@ -408,6 +566,25 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
 
       playerRef.current = player;
       didJustFinishRef.current = false;
+
+      // Lock Screen & Notification media controls setup
+      try {
+        const activeTitle = (newContext || playbackContextRef.current)?.title || 'Our Voice';
+        player.setActiveForLockScreen(
+          true,
+          {
+            title: vn.title,
+            artist: 'Our Voice',
+            albumTitle: activeTitle,
+          },
+          {
+            showSeekForward: true,
+            showSeekBackward: true,
+          }
+        );
+      } catch (lockErr) {
+        console.warn('[LOCK SCREEN] Failed to set lock screen controls:', lockErr);
+      }
 
       if (initialPos > 0) {
         try {
@@ -441,6 +618,16 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
             }
           }
 
+          // Record to Recently Played once playback reaches >= 3 seconds
+          if (
+            status.playing &&
+            status.currentTime >= 3 &&
+            recordedRecentForTrackRef.current !== vn.id
+          ) {
+            recordedRecentForTrackRef.current = vn.id;
+            recentlyPlayedRepository.recordPlay(vn.id).catch(() => {});
+          }
+
           if (status.didJustFinish) {
             handleTrackFinish(vn);
           }
@@ -462,6 +649,12 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
 
   // Automatic transition when track naturally finishes
   const handleTrackFinish = async (finishedVn: VN) => {
+    // Record to Recently Played if finished before 3 seconds
+    if (recordedRecentForTrackRef.current !== finishedVn.id) {
+      recordedRecentForTrackRef.current = finishedVn.id;
+      recentlyPlayedRepository.recordPlay(finishedVn.id).catch(() => {});
+    }
+
     // 1. Sleep timer "End of VN" takes priority
     if (sleepTimerTypeRef.current === 'end_of_vn') {
       setSleepTimer('off');
@@ -509,16 +702,37 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     // 4. Current Playback Context continuation
     const context = playbackContextRef.current;
     if (context && context.items.length > 0) {
-      const currentIndex = context.items.findIndex((v) => v.id === finishedVn.id);
-      if (currentIndex !== -1 && currentIndex + 1 < context.items.length) {
-        const nextVn = context.items[currentIndex + 1];
-        await playInternal(nextVn, 0);
-        return;
-      } else if (repeatModeRef.current === 'all') {
-        // Wrap to the beginning of the context
-        const firstVn = context.items[0];
-        await playInternal(firstVn, 0);
-        return;
+      if (isShuffleRef.current && shuffledOrderRef.current.length > 0) {
+        const nextPointer = shufflePointerRef.current + 1;
+        if (nextPointer < shuffledOrderRef.current.length) {
+          shufflePointerRef.current = nextPointer;
+          const nextIdx = shuffledOrderRef.current[nextPointer];
+          if (nextIdx >= 0 && nextIdx < context.items.length) {
+            await playInternal(context.items[nextIdx], 0);
+            return;
+          }
+        } else if (repeatModeRef.current === 'all') {
+          // Reshuffle for new cycle
+          const lastIdx = shuffledOrderRef.current[shuffledOrderRef.current.length - 1];
+          const reshuffled = generateReshuffledOrder(context.items.length, lastIdx);
+          shuffledOrderRef.current = reshuffled;
+          setShuffledOrder(reshuffled);
+          shufflePointerRef.current = 0;
+          await playInternal(context.items[shuffledOrderRef.current[0]], 0);
+          return;
+        }
+      } else {
+        const currentIndex = context.items.findIndex((v) => v.id === finishedVn.id);
+        if (currentIndex !== -1 && currentIndex + 1 < context.items.length) {
+          const nextVn = context.items[currentIndex + 1];
+          await playInternal(nextVn, 0);
+          return;
+        } else if (repeatModeRef.current === 'all') {
+          // Wrap to the beginning of the context
+          const firstVn = context.items[0];
+          await playInternal(firstVn, 0);
+          return;
+        }
       }
     }
 
@@ -586,22 +800,46 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     // 2. Playback Context priority
     const context = playbackContextRef.current;
     if (context && context.items.length > 0) {
-      const currentId = currentVnRef.current?.id;
-      const currentIndex = currentId
-        ? context.items.findIndex((v) => v.id === currentId)
-        : -1;
+      if (isShuffleRef.current && shuffledOrderRef.current.length > 0) {
+        const nextPointer = shufflePointerRef.current + 1;
+        if (nextPointer < shuffledOrderRef.current.length) {
+          shufflePointerRef.current = nextPointer;
+          const nextIdx = shuffledOrderRef.current[nextPointer];
+          if (nextIdx >= 0 && nextIdx < context.items.length) {
+            await playInternal(context.items[nextIdx], 0);
+            return;
+          }
+        } else if (repeatModeRef.current === 'all') {
+          const lastIdx = shuffledOrderRef.current[shuffledOrderRef.current.length - 1];
+          const reshuffled = generateReshuffledOrder(context.items.length, lastIdx);
+          shuffledOrderRef.current = reshuffled;
+          setShuffledOrder(reshuffled);
+          shufflePointerRef.current = 0;
+          await playInternal(context.items[shuffledOrderRef.current[0]], 0);
+          return;
+        } else if (repeatModeRef.current === 'off') {
+          pause();
+          isBusyRef.current = false;
+          return;
+        }
+      } else {
+        const currentId = currentVnRef.current?.id;
+        const currentIndex = currentId
+          ? context.items.findIndex((v) => v.id === currentId)
+          : -1;
 
-      if (currentIndex !== -1 && currentIndex + 1 < context.items.length) {
-        await playInternal(context.items[currentIndex + 1], 0);
-        return;
-      } else if (repeatModeRef.current === 'all') {
-        await playInternal(context.items[0], 0);
-        return;
-      } else if (repeatModeRef.current === 'off') {
-        // Stop cleanly at end
-        pause();
-        isBusyRef.current = false;
-        return;
+        if (currentIndex !== -1 && currentIndex + 1 < context.items.length) {
+          await playInternal(context.items[currentIndex + 1], 0);
+          return;
+        } else if (repeatModeRef.current === 'all') {
+          await playInternal(context.items[0], 0);
+          return;
+        } else if (repeatModeRef.current === 'off') {
+          // Stop cleanly at end
+          pause();
+          isBusyRef.current = false;
+          return;
+        }
       }
     } else {
       // Fallback: load all VNs if no context
@@ -646,20 +884,23 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     // Check context for previous track
     const context = playbackContextRef.current;
     if (context && context.items.length > 0) {
-      const currentId = currentVnRef.current?.id;
-      const currentIndex = currentId
-        ? context.items.findIndex((v) => v.id === currentId)
-        : -1;
-
-      if (currentIndex > 0) {
-        await playInternal(context.items[currentIndex - 1], 0);
-        return;
-      } else if (currentIndex === 0) {
-        if (repeatModeRef.current === 'all') {
-          await playInternal(context.items[context.items.length - 1], 0);
-          return;
+      if (isShuffleRef.current && shuffledOrderRef.current.length > 0) {
+        if (shufflePointerRef.current > 0) {
+          shufflePointerRef.current -= 1;
+          const prevIdx = shuffledOrderRef.current[shufflePointerRef.current];
+          if (prevIdx >= 0 && prevIdx < context.items.length) {
+            await playInternal(context.items[prevIdx], 0);
+            return;
+          }
+        } else if (repeatModeRef.current === 'all') {
+          shufflePointerRef.current = shuffledOrderRef.current.length - 1;
+          const prevIdx = shuffledOrderRef.current[shufflePointerRef.current];
+          if (prevIdx >= 0 && prevIdx < context.items.length) {
+            await playInternal(context.items[prevIdx], 0);
+            return;
+          }
         } else {
-          // Stay on first track and seek to 0
+          // Seek to 0
           if (playerRef.current) {
             await playerRef.current.seekTo(0);
             setCurrentTime(0);
@@ -667,6 +908,30 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
           }
           isBusyRef.current = false;
           return;
+        }
+      } else {
+        const currentId = currentVnRef.current?.id;
+        const currentIndex = currentId
+          ? context.items.findIndex((v) => v.id === currentId)
+          : -1;
+
+        if (currentIndex > 0) {
+          await playInternal(context.items[currentIndex - 1], 0);
+          return;
+        } else if (currentIndex === 0) {
+          if (repeatModeRef.current === 'all') {
+            await playInternal(context.items[context.items.length - 1], 0);
+            return;
+          } else {
+            // Stay on first track and seek to 0
+            if (playerRef.current) {
+              await playerRef.current.seekTo(0);
+              setCurrentTime(0);
+              currentTimeRef.current = 0;
+            }
+            isBusyRef.current = false;
+            return;
+          }
         }
       }
     }
@@ -784,6 +1049,8 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
         duration,
         isLooping,
         repeatMode,
+        isShuffle,
+        shuffledOrder,
         playbackRate,
         sleepTimerType,
         sleepTimerRemaining,
@@ -796,6 +1063,9 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
         toggleLoop,
         setRepeatMode,
         cycleRepeatMode,
+        toggleShuffle,
+        shuffleAll,
+        addAlbumToQueue,
         setPlaybackRate,
         setSleepTimer,
         seekTo,

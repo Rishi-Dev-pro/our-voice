@@ -25,6 +25,9 @@ import { AppleArtwork } from '@/components/apple-artwork';
 import { useTheme } from '@/hooks/use-theme';
 import { teddyReactionService } from '@/services/teddyReactionService';
 
+import { packageService } from '@/services/packageService';
+import { sharingService } from '@/services/sharingService';
+
 export default function AlbumDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const albumId = Array.isArray(id) ? id[0] : id;
@@ -32,12 +35,13 @@ export default function AlbumDetailScreen() {
   const [album, setAlbum] = useState<Album | null>(null);
   const [vns, setVns] = useState<VN[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Add VN to Album Picker Modal
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [availableVns, setAvailableVns] = useState<VN[]>([]);
 
-  const { currentVn, isPlaying, playVn, updateCurrentVnMetadata } = useAudio();
+  const { currentVn, isPlaying, playVn, shuffleAll, addAlbumToQueue, updateCurrentVnMetadata } = useAudio();
   const router = useRouter();
   const theme = useTheme();
 
@@ -172,8 +176,40 @@ export default function AlbumDetailScreen() {
   // Apple Music "Shuffle" Action
   function handleShufflePlay() {
     if (vns.length > 0) {
-      const randomIndex = Math.floor(Math.random() * vns.length);
-      playVn(vns[randomIndex], 0, albumContext);
+      shuffleAll(vns, albumContext);
+    }
+  }
+
+  async function handleExportAlbum() {
+    if (!albumId || vns.length === 0) {
+      Alert.alert('Empty Album', 'Add recordings to this album before exporting.');
+      return;
+    }
+    setIsExporting(true);
+    try {
+      const packageUri = await packageService.exportAlbumPackage(albumId);
+      await sharingService.shareFile(
+        packageUri,
+        `Share Album "${album?.name || 'Album'}" (.ovp)`
+      );
+    } catch (err: any) {
+      Alert.alert('Export Failed', err?.message || 'Could not export album package.');
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  function handleAddAlbumToQueue() {
+    if (vns.length === 0) return;
+    const res = addAlbumToQueue(vns);
+    if (res.addedCount > 0) {
+      Alert.alert(
+        'Queue Updated',
+        `Added ${res.addedCount} recording${res.addedCount > 1 ? 's' : ''} to Up Next queue.`
+      );
+      teddyReactionService.trigger('CUSTOM', 'Added album to Up Next queue! 🧸🎶');
+    } else {
+      Alert.alert('Already in Queue', 'All recordings in this album are already in your queue.');
     }
   }
 
@@ -237,29 +273,67 @@ export default function AlbumDetailScreen() {
 
               {/* Apple Music Dual Action Pills: Play & Shuffle */}
               {vns.length > 0 && (
-                <View style={styles.dualPillRow}>
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.actionPill,
-                      { backgroundColor: theme.backgroundElement },
-                      pressed && { opacity: 0.75 },
-                    ]}
-                    onPress={handlePlayAll}>
-                    <Ionicons name="play" size={20} color={theme.tint} />
-                    <Text style={[styles.actionPillText, { color: theme.tint }]}>Play</Text>
-                  </Pressable>
+                <>
+                  <View style={styles.dualPillRow}>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.actionPill,
+                        { backgroundColor: theme.backgroundElement },
+                        pressed && { opacity: 0.75 },
+                      ]}
+                      onPress={handlePlayAll}>
+                      <Ionicons name="play" size={20} color={theme.tint} />
+                      <Text style={[styles.actionPillText, { color: theme.tint }]}>Play</Text>
+                    </Pressable>
 
-                  <Pressable
-                    style={({ pressed }) => [
-                      styles.actionPill,
-                      { backgroundColor: theme.backgroundElement },
-                      pressed && { opacity: 0.75 },
-                    ]}
-                    onPress={handleShufflePlay}>
-                    <Ionicons name="shuffle" size={20} color={theme.tint} />
-                    <Text style={[styles.actionPillText, { color: theme.tint }]}>Shuffle</Text>
-                  </Pressable>
-                </View>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.actionPill,
+                        { backgroundColor: theme.backgroundElement },
+                        pressed && { opacity: 0.75 },
+                      ]}
+                      onPress={handleShufflePlay}>
+                      <Ionicons name="shuffle" size={20} color={theme.tint} />
+                      <Text style={[styles.actionPillText, { color: theme.tint }]}>Shuffle</Text>
+                    </Pressable>
+                  </View>
+
+                  {/* Secondary Action Row: Queue All & Export .ovp */}
+                  <View style={styles.utilityPillRow}>
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.utilityPill,
+                        { backgroundColor: theme.backgroundElement },
+                        pressed && { opacity: 0.7 },
+                      ]}
+                      onPress={handleAddAlbumToQueue}>
+                      <Ionicons name="list" size={16} color={theme.textSecondary} />
+                      <Text style={[styles.utilityPillText, { color: theme.textSecondary }]}>
+                        Queue All
+                      </Text>
+                    </Pressable>
+
+                    <Pressable
+                      style={({ pressed }) => [
+                        styles.utilityPill,
+                        { backgroundColor: theme.backgroundElement },
+                        pressed && { opacity: 0.7 },
+                      ]}
+                      disabled={isExporting}
+                      onPress={handleExportAlbum}>
+                      {isExporting ? (
+                        <ActivityIndicator size="small" color={theme.tint} />
+                      ) : (
+                        <>
+                          <Ionicons name="share-outline" size={16} color={theme.tint} />
+                          <Text style={[styles.utilityPillText, { color: theme.tint }]}>
+                            Export .ovp
+                          </Text>
+                        </>
+                      )}
+                    </Pressable>
+                  </View>
+                </>
               )}
             </View>
           }
@@ -451,6 +525,27 @@ const styles = StyleSheet.create({
   actionPillText: {
     fontSize: 16,
     fontWeight: '600',
+  },
+  utilityPillRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    width: '100%',
+    paddingHorizontal: 10,
+    marginTop: 10,
+  },
+  utilityPill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    height: 38,
+    borderRadius: 10,
+  },
+  utilityPillText: {
+    fontSize: 13,
+    fontWeight: '500',
   },
   centered: {
     flex: 1,

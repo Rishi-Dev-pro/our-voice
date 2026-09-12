@@ -48,6 +48,7 @@ export default function PlayerScreen() {
     currentTime,
     duration,
     repeatMode,
+    isShuffle,
     playbackRate,
     sleepTimerType,
     sleepTimerRemaining,
@@ -55,6 +56,7 @@ export default function PlayerScreen() {
     playVn,
     togglePlayPause,
     cycleRepeatMode,
+    toggleShuffle,
     playNextTrack,
     playPreviousTrack,
     addToQueue,
@@ -635,8 +637,25 @@ export default function PlayerScreen() {
           </Pressable>
         </View>
 
-        {/* Bottom Auxiliary Bar: Repeat, Speed, Sleep Timer, Add to Album, Up Next */}
+        {/* Bottom Auxiliary Bar: Shuffle, Repeat, Speed, Sleep Timer, Add to Album, Up Next */}
         <View style={styles.auxiliaryBar}>
+          {/* Shuffle Button */}
+          <Pressable
+            style={({ pressed }) => [
+              styles.auxBtn,
+              pressed && { opacity: 0.7 },
+            ]}
+            onPress={() => {
+              toggleShuffle();
+              teddyReactionService.trigger('CUSTOM', !isShuffle ? 'Shuffle enabled 🔀' : 'Shuffle turned off ➡️');
+            }}>
+            <Ionicons
+              name="shuffle"
+              size={22}
+              color={isShuffle ? theme.tint : theme.textSecondary}
+            />
+          </Pressable>
+
           {/* Repeat Button */}
           <Pressable
             style={({ pressed }) => [

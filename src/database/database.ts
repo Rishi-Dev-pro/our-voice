@@ -70,6 +70,14 @@ export function getDatabase(): SQLite.SQLiteDatabase {
         );
       `);
 
+      db.execSync(`
+        CREATE TABLE IF NOT EXISTS recently_played (
+          vnId TEXT PRIMARY KEY NOT NULL,
+          lastPlayedAt INTEGER NOT NULL,
+          FOREIGN KEY (vnId) REFERENCES vns (id) ON DELETE CASCADE
+        );
+      `);
+
       // Safe non-destructive performance indexes
       db.execSync(`
         CREATE INDEX IF NOT EXISTS idx_vns_createdAt ON vns(createdAt DESC);
@@ -78,6 +86,7 @@ export function getDatabase(): SQLite.SQLiteDatabase {
         CREATE INDEX IF NOT EXISTS idx_vns_isPinned ON vns(isPinned);
         CREATE INDEX IF NOT EXISTS idx_album_vns_albumId ON album_vns(albumId);
         CREATE INDEX IF NOT EXISTS idx_album_vns_vnId ON album_vns(vnId);
+        CREATE INDEX IF NOT EXISTS idx_recently_played_lastPlayedAt ON recently_played(lastPlayedAt DESC);
       `);
 
       dbInstance = db;
