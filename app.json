@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Our-Voice",
+    "name": "Our Voice",
     "slug": "Our-Voice",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -11,12 +11,21 @@
       "icon": "./assets/expo.icon"
     },
     "android": {
+      "package": "com.rishi.ourvoice",
+      "versionCode": 1,
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#FFFBEB",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
+      "permissions": [
+        "RECORD_AUDIO",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+      ],
       "predictiveBackGestureEnabled": false
     },
     "web": {
@@ -28,15 +37,25 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#1C1917",
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": 100
         }
-      ]
+      ],
+      "expo-sqlite",
+      "expo-audio",
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "940e47ff-dd5f-422f-818f-63b3b032fbd9"
+      }
+    },
+    "owner": "rishishaw"
   }
 }

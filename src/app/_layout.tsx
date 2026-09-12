@@ -1,18 +1,37 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
+import { Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
 import { useColorScheme } from 'react-native';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+import { AudioPlayerProvider } from '@/services/audioPlayerContext';
+import { TeddyReactionBanner } from '@/components/teddy-reaction-banner';
 
-SplashScreen.preventAutoHideAsync();
-
-export default function TabLayout() {
+export default function RootLayout() {
   const colorScheme = useColorScheme();
+
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
+      <AudioPlayerProvider>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="index" />
+          <Stack.Screen name="record" options={{ animation: 'slide_from_bottom' }} />
+          <Stack.Screen name="imported" />
+          <Stack.Screen name="recorded" />
+          <Stack.Screen name="liked" />
+          <Stack.Screen name="albums" />
+          <Stack.Screen name="album/[id]" />
+          <Stack.Screen
+            name="player/[id]"
+            options={{
+              presentation: 'modal',
+              animation: 'slide_from_bottom',
+            }}
+          />
+        </Stack>
+        <TeddyReactionBanner />
+        <StatusBar style="auto" />
+      </AudioPlayerProvider>
     </ThemeProvider>
   );
 }
+
