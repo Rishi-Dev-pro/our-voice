@@ -1,6 +1,7 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
-import { Alert, DeviceEventEmitter } from 'react-native';
-import { AudioPlayer, createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, DeviceEventEmitter, Platform } from 'react-native';
+import { AudioPlayer, createAudioPlayer, setAudioModeAsync, requestNotificationPermissionsAsync } from 'expo-audio';
+import Constants from 'expo-constants';
 import { VN } from '@/types/vn';
 import { vnRepository } from '@/database/repositories/vnRepository';
 import { recentlyPlayedRepository } from '@/database/repositories/recentlyPlayedRepository';
@@ -22,7 +23,7 @@ export const SUPPORTED_SPEEDS = [0.75, 1.0, 1.25, 1.5, 2.0] as const;
 export type PlaybackSpeed = (typeof SUPPORTED_SPEEDS)[number];
 
 export type RepeatMode = 'off' | 'all' | 'one';
-export type PlaybackContextType = 'album' | 'liked' | 'pinned' | 'all' | 'recent' | 'search';
+export type PlaybackContextType = 'album' | 'liked' | 'pinned' | 'all' | 'recent' | 'search' | 'single';
 
 export interface PlaybackContext {
   type: PlaybackContextType;
@@ -31,11 +32,9 @@ export interface PlaybackContext {
   items: VN[];
 }
 
-interface AudioContextType {
+export interface AudioState {
   currentVn: VN | null;
   isPlaying: boolean;
-  currentTime: number;
-  duration: number;
   isLooping: boolean;
   repeatMode: RepeatMode;
   isShuffle: boolean;
@@ -45,6 +44,14 @@ interface AudioContextType {
   sleepTimerRemaining: number | null;
   manualQueue: VN[];
   playbackContext: PlaybackContext | null;
+}
+
+export interface AudioProgress {
+  currentTime: number;
+  duration: number;
+}
+
+export interface AudioActions {
   playVn: (vn: VN, startPosition?: number, newContext?: PlaybackContext) => Promise<void>;
   pause: () => void;
   resume: () => void;
@@ -71,7 +78,11 @@ interface AudioContextType {
   playPreviousTrack: (forcePrevious?: boolean) => Promise<void>;
 }
 
-const AudioContext = createContext<AudioContextType | null>(null);
+export type AudioContextType = AudioState & AudioProgress & AudioActions;
+
+const AudioStateContext = createContext<AudioState | null>(null);
+const AudioProgressContext = createContext<AudioProgress | null>(null);
+const AudioActionsContext = createContext<AudioActions | null>(null);
 
 function generateShuffledOrder(count: number, startIndex: number = 0): number[] {
   if (count <= 1) return [0];
@@ -102,6 +113,7 @@ function generateReshuffledOrder(count: number, lastPlayedIndex: number): number
 }
 
 export function AudioPlayerProvider({ children }: { children: React.ReactNode }) {
+  // Authoritative State
   const [currentVn, setCurrentVn] = useState<VN | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -115,11 +127,17 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
   const [manualQueue, setManualQueue] = useState<VN[]>([]);
   const [playbackContext, setPlaybackContextState] = useState<PlaybackContext | null>(null);
 
+  // Authoritative Refs for synchronous and background operations
   const playerRef = useRef<AudioPlayer | null>(null);
   const subscriptionRef = useRef<{ remove: () => void } | null>(null);
   const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const didJustFinishRef = useRef(false);
-  const isBusyRef = useRef(false);
+
+  // Transition token to eliminate async race conditions across rapid Next/Prev commands
+  const transitionTokenRef = useRef(0);
+
+  const isPlayingRef = useRef(false);
+  isPlayingRef.current = isPlaying;
 
   const repeatModeRef = useRef<RepeatMode>('all');
   repeatModeRef.current = repeatMode;
@@ -128,8 +146,11 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
   isShuffleRef.current = isShuffle;
 
   const shuffledOrderRef = useRef<number[]>([]);
+  shuffledOrderRef.current = shuffledOrder;
+
   const shufflePointerRef = useRef(0);
   const recordedRecentForTrackRef = useRef<string | null>(null);
+  const isLockScreenActiveRef = useRef(false);
 
   const isLooping = repeatMode === 'one';
   const isLoopingRef = useRef(false);
@@ -158,41 +179,98 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
   const playbackContextRef = useRef<PlaybackContext | null>(null);
   playbackContextRef.current = playbackContext;
 
+  // Track playback history stack (recent 50 played VN IDs) for deterministic Previous navigation
+  const playbackHistoryRef = useRef<string[]>([]);
+  const lastContextIndexRef = useRef<number>(-1);
+  const clearedVnIdRef = useRef<string | null>(null);
+
   const stopRef = useRef<() => void>(() => {});
+  const pauseRef = useRef<() => void>(() => {});
+  const resumeRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const seekToRef = useRef<(sec: number) => Promise<void>>(() => Promise.resolve());
+  const playInternalRef = useRef<
+    (vn: VN, startPos?: number, ctx?: PlaybackContext, token?: number) => Promise<void>
+  >(() => Promise.resolve());
+  const resolveNextTrackRef = useRef<(manual?: boolean) => Promise<void>>(() => Promise.resolve());
+  const resolvePreviousTrackRef = useRef<(force?: boolean) => Promise<void>>(() => Promise.resolve());
+  const playNextTrackRef = useRef<(_fromSwipe?: boolean) => Promise<void>>(() => Promise.resolve());
+
+  const addToHistory = useCallback((vnId: string) => {
+    const hist = playbackHistoryRef.current;
+    if (hist.length === 0 || hist[hist.length - 1] !== vnId) {
+      playbackHistoryRef.current = [...hist.slice(-49), vnId];
+    }
+  }, []);
 
   useEffect(() => {
-    // Configure audio mode for offline local playback
     setAudioModeAsync({
       playsInSilentMode: true,
       shouldPlayInBackground: true,
       interruptionMode: 'doNotMix',
     }).catch((err) => console.warn('Could not set audio mode:', err));
 
-    // Listen to global VN deletion events to clear player and queue immediately
+    if (Platform.OS === 'android') {
+      requestNotificationPermissionsAsync().catch((err) => {
+        console.warn('Could not request notification permissions:', err);
+      });
+    }
+
     const delSub = DeviceEventEmitter.addListener('vn_deleted', (deletedId: string) => {
-      setManualQueue((prev) => prev.filter((v) => v.id !== deletedId));
-      setPlaybackContextState((prev) =>
-        prev ? { ...prev, items: prev.items.filter((v) => v.id !== deletedId) } : null
-      );
+      manualQueueRef.current = manualQueueRef.current.filter((v) => v.id !== deletedId);
+      setManualQueue(manualQueueRef.current);
+      setPlaybackContextState((prev) => {
+        if (!prev) return null;
+        const updated = { ...prev, items: prev.items.filter((v) => v.id !== deletedId) };
+        playbackContextRef.current = updated;
+        return updated;
+      });
+      playbackHistoryRef.current = playbackHistoryRef.current.filter((id) => id !== deletedId);
+
       if (currentVnRef.current?.id === deletedId) {
-        stopRef.current();
+        // Current playing VN was deleted: stop player and advance to next valid track without replaying deleted VN
+        cleanupPlayer();
+        currentVnRef.current = null;
+        setCurrentVn(null);
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+        setCurrentTime(0);
+        currentTimeRef.current = 0;
+        lastSavedPositionRef.current = 0;
+        resolveNextTrackRef.current(true);
       }
     });
 
-    // Listen to global metadata update events
     const metaSub = DeviceEventEmitter.addListener(
       'vn_metadata_updated',
       ({ id, updates }: { id: string; updates: Partial<VN> }) => {
-        setManualQueue((prev) =>
-          prev.map((v) => (v.id === id ? { ...v, ...updates } : v))
+        manualQueueRef.current = manualQueueRef.current.map((v) =>
+          v.id === id ? { ...v, ...updates } : v
         );
-        setPlaybackContextState((prev) =>
-          prev
-            ? { ...prev, items: prev.items.map((v) => (v.id === id ? { ...v, ...updates } : v)) }
-            : null
-        );
+        setManualQueue(manualQueueRef.current);
+
+        setPlaybackContextState((prev) => {
+          if (!prev) return null;
+          const updated = {
+            ...prev,
+            items: prev.items.map((v) => (v.id === id ? { ...v, ...updates } : v)),
+          };
+          playbackContextRef.current = updated;
+          return updated;
+        });
+
         if (currentVnRef.current?.id === id) {
           setCurrentVn((prev) => (prev ? { ...prev, ...updates } : null));
+          if (isLockScreenActiveRef.current && playerRef.current) {
+            try {
+              playerRef.current.updateLockScreenMetadata({
+                title: updates.title || currentVnRef.current?.title || 'Voice Note',
+                artist: 'Our Voice',
+                albumTitle: playbackContextRef.current?.title || 'Our Voice',
+              });
+            } catch (err) {
+              console.warn('Could not update lock screen metadata on rename event:', err);
+            }
+          }
         }
       }
     );
@@ -213,9 +291,12 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
       subscriptionRef.current = null;
     }
     if (playerRef.current) {
-      try {
-        playerRef.current.clearLockScreenControls();
-      } catch {}
+      if (isLockScreenActiveRef.current) {
+        try {
+          playerRef.current.clearLockScreenControls();
+        } catch {}
+        isLockScreenActiveRef.current = false;
+      }
       try {
         playerRef.current.pause();
         playerRef.current.remove();
@@ -227,37 +308,37 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     didJustFinishRef.current = false;
   }
 
-  const updateCurrentVnMetadata = (updates: Partial<VN>) => {
+  const updateCurrentVnMetadata = useCallback((updates: Partial<VN>) => {
     setCurrentVn((prev) => (prev ? { ...prev, ...updates } : null));
-    setManualQueue((prev) =>
-      prev.map((v) => (v.id === currentVnRef.current?.id ? { ...v, ...updates } : v))
+    manualQueueRef.current = manualQueueRef.current.map((v) =>
+      v.id === currentVnRef.current?.id ? { ...v, ...updates } : v
     );
-    setPlaybackContextState((prev) =>
-      prev
-        ? {
-            ...prev,
-            items: prev.items.map((v) =>
-              v.id === currentVnRef.current?.id ? { ...v, ...updates } : v
-            ),
-          }
-        : null
-    );
-    try {
-      playerRef.current?.updateLockScreenMetadata({
-        title: updates.title || currentVnRef.current?.title || 'Voice Note',
-        artist: 'Our Voice',
-        albumTitle: playbackContextRef.current?.title || 'Our Voice',
-      });
-    } catch {}
-  };
+    setManualQueue(manualQueueRef.current);
 
-  const stopIfPlaying = (vnId: string) => {
-    if (currentVnRef.current?.id === vnId) {
-      stop();
+    setPlaybackContextState((prev) => {
+      if (!prev) return null;
+      const updated = {
+        ...prev,
+        items: prev.items.map((v) =>
+          v.id === currentVnRef.current?.id ? { ...v, ...updates } : v
+        ),
+      };
+      playbackContextRef.current = updated;
+      return updated;
+    });
+
+    if (isLockScreenActiveRef.current && playerRef.current) {
+      try {
+        playerRef.current.updateLockScreenMetadata({
+          title: updates.title || currentVnRef.current?.title || 'Voice Note',
+          artist: 'Our Voice',
+          albumTitle: playbackContextRef.current?.title || 'Our Voice',
+        });
+      } catch {}
     }
-  };
+  }, []);
 
-  const setPlaybackRate = (rate: PlaybackSpeed) => {
+  const setPlaybackRate = useCallback((rate: PlaybackSpeed) => {
     setPlaybackRateState(rate);
     playbackRateRef.current = rate;
     if (playerRef.current) {
@@ -267,38 +348,36 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
         console.warn('Error setting playback rate on active player:', e);
       }
     }
-  };
+  }, []);
 
-  const setRepeatMode = (mode: RepeatMode) => {
+  const setRepeatMode = useCallback((mode: RepeatMode) => {
     setRepeatModeState(mode);
     repeatModeRef.current = mode;
-    const looping = mode === 'one';
-    isLoopingRef.current = looping;
+    isLoopingRef.current = mode === 'one';
+    // Semantics: JS authoritative engine controls repeats.
+    // player.loop is intentionally kept false so expo-audio emits didJustFinish cleanly on Android.
     if (playerRef.current) {
       try {
-        playerRef.current.loop = looping;
-      } catch (e) {
-        console.warn('Could not set player.loop:', e);
-      }
+        playerRef.current.loop = false;
+      } catch {}
     }
-  };
+  }, []);
 
-  const cycleRepeatMode = () => {
+  const cycleRepeatMode = useCallback(() => {
     const nextMode: RepeatMode =
       repeatModeRef.current === 'off' ? 'all' : repeatModeRef.current === 'all' ? 'one' : 'off';
     setRepeatMode(nextMode);
-  };
+  }, [setRepeatMode]);
 
-  const toggleLoop = () => {
-    // Unifies existing toggleLoop with repeatMode
+  const toggleLoop = useCallback(() => {
     if (repeatModeRef.current === 'one') {
       setRepeatMode('off');
     } else {
       setRepeatMode('one');
     }
-  };
+  }, [setRepeatMode]);
 
-  const setSleepTimer = (option: SleepTimerOption) => {
+  const setSleepTimer = useCallback((option: SleepTimerOption) => {
     if (timerIntervalRef.current) {
       clearInterval(timerIntervalRef.current);
       timerIntervalRef.current = null;
@@ -306,23 +385,6 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
 
     setSleepTimerType(option);
     sleepTimerTypeRef.current = option;
-
-    // If End of VN is selected, prevent native player from silently auto-repeating
-    if (option === 'end_of_vn') {
-      if (playerRef.current) {
-        try {
-          playerRef.current.loop = false;
-        } catch (e) {
-          console.warn('Could not set player.loop = false for end_of_vn timer:', e);
-        }
-      }
-    } else if (isLoopingRef.current && playerRef.current) {
-      try {
-        playerRef.current.loop = true;
-      } catch (e) {
-        console.warn('Could not restore player.loop:', e);
-      }
-    }
 
     const seconds = SLEEP_TIMER_DURATIONS[option];
     if (seconds === null) {
@@ -343,15 +405,15 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
         setSleepTimerType('off');
         sleepTimerTypeRef.current = 'off';
         setSleepTimerRemaining(null);
-        pause();
+        pauseRef.current();
       } else {
         setSleepTimerRemaining(remaining);
       }
     }, 1000);
-  };
+  }, []);
 
-  const toggleShuffle = () => {
-    const nextState = !isShuffle;
+  const toggleShuffle = useCallback(() => {
+    const nextState = !isShuffleRef.current;
     setIsShuffle(nextState);
     isShuffleRef.current = nextState;
 
@@ -359,27 +421,724 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
       const items = playbackContextRef.current.items;
       const currentId = currentVnRef.current?.id;
       const startIdx = currentId ? items.findIndex((v) => v.id === currentId) : 0;
+      if (startIdx !== -1) {
+        lastContextIndexRef.current = startIdx;
+      }
       const order = generateShuffledOrder(items.length, startIdx >= 0 ? startIdx : 0);
       shuffledOrderRef.current = order;
       setShuffledOrder(order);
       shufflePointerRef.current = 0;
     }
-  };
+  }, []);
 
-  const setPlaybackContext = (context: PlaybackContext) => {
+  const setPlaybackContext = useCallback((context: PlaybackContext) => {
     setPlaybackContextState(context);
     playbackContextRef.current = context;
+    const currentId = currentVnRef.current?.id;
+    const startIdx = currentId ? context.items.findIndex((v) => v.id === currentId) : 0;
+    if (startIdx !== -1) {
+      lastContextIndexRef.current = startIdx;
+    }
     if (isShuffleRef.current && context.items.length > 0) {
-      const currentId = currentVnRef.current?.id;
-      const startIdx = currentId ? context.items.findIndex((v) => v.id === currentId) : 0;
       const order = generateShuffledOrder(context.items.length, startIdx >= 0 ? startIdx : 0);
       shuffledOrderRef.current = order;
       setShuffledOrder(order);
       shufflePointerRef.current = 0;
     }
+  }, []);
+
+  const addAlbumToQueue = useCallback((vns: VN[]): { success: boolean; addedCount: number } => {
+    if (!vns || vns.length === 0) {
+      return { success: false, addedCount: 0 };
+    }
+    const existingQueueIds = new Set(manualQueueRef.current.map((v) => v.id));
+    const toAdd = vns.filter((v) => !existingQueueIds.has(v.id));
+    if (toAdd.length === 0) {
+      return { success: false, addedCount: 0 };
+    }
+    const updated = [...manualQueueRef.current, ...toAdd];
+    manualQueueRef.current = updated;
+    setManualQueue(updated);
+    return { success: true, addedCount: toAdd.length };
+  }, []);
+
+  const addToQueue = useCallback((vn: VN): { success: boolean; message: string } => {
+    if (manualQueueRef.current.some((item) => item.id === vn.id)) {
+      return { success: false, message: 'Already in queue' };
+    }
+    const updated = [...manualQueueRef.current, vn];
+    manualQueueRef.current = updated;
+    setManualQueue(updated);
+    return { success: true, message: `Added "${vn.title}" to queue` };
+  }, []);
+
+  const playNext = useCallback((vn: VN): { success: boolean; message: string } => {
+    const filtered = manualQueueRef.current.filter((item) => item.id !== vn.id);
+    const updated = [vn, ...filtered];
+    manualQueueRef.current = updated;
+    setManualQueue(updated);
+    return { success: true, message: `"${vn.title}" will play next` };
+  }, []);
+
+  const removeFromQueue = useCallback((vnId: string) => {
+    const updated = manualQueueRef.current.filter((item) => item.id !== vnId);
+    manualQueueRef.current = updated;
+    setManualQueue(updated);
+  }, []);
+
+  const clearQueue = useCallback(() => {
+    manualQueueRef.current = [];
+    setManualQueue([]);
+  }, []);
+
+  const moveQueueItem = useCallback((fromIndex: number, direction: 'up' | 'down') => {
+    const toIndex = direction === 'up' ? fromIndex - 1 : fromIndex + 1;
+    const prev = manualQueueRef.current;
+    if (toIndex < 0 || toIndex >= prev.length) return;
+    const next = [...prev];
+    const item = next.splice(fromIndex, 1)[0];
+    next.splice(toIndex, 0, item);
+    manualQueueRef.current = next;
+    setManualQueue(next);
+  }, []);
+
+  // Internal playback execution helper guarded by transition token
+  const playInternal = async (
+    vn: VN,
+    startPosition: number = 0,
+    newContext?: PlaybackContext,
+    assignedToken?: number
+  ) => {
+    const token = assignedToken ?? ++transitionTokenRef.current;
+
+    if (newContext) {
+      setPlaybackContextState(newContext);
+      playbackContextRef.current = newContext;
+      const idx = newContext.items.findIndex((item) => item.id === vn.id);
+      if (idx !== -1) {
+        lastContextIndexRef.current = idx;
+      }
+      if (isShuffleRef.current && newContext.items.length > 0) {
+        const startIdx = newContext.items.findIndex((v) => v.id === vn.id);
+        const order = generateShuffledOrder(newContext.items.length, startIdx >= 0 ? startIdx : 0);
+        shuffledOrderRef.current = order;
+        setShuffledOrder(order);
+        shufflePointerRef.current = 0;
+      }
+    } else if (
+      !playbackContextRef.current ||
+      !playbackContextRef.current.items.some((item) => item.id === vn.id)
+    ) {
+      // Single VN fallback context: track does not belong to existing context.
+      // Establish dedicated single context to prevent cross-context pollution!
+      const singleContext: PlaybackContext = {
+        type: 'single',
+        id: vn.id,
+        title: vn.title,
+        items: [vn],
+      };
+      setPlaybackContextState(singleContext);
+      playbackContextRef.current = singleContext;
+      lastContextIndexRef.current = 0;
+    } else {
+      // vn is inside active playbackContextRef.current:
+      const idx = playbackContextRef.current.items.findIndex((item) => item.id === vn.id);
+      if (idx !== -1) {
+        lastContextIndexRef.current = idx;
+      }
+      if (isShuffleRef.current && playbackContextRef.current.items.length > 0) {
+        const orderIdx = shuffledOrderRef.current.indexOf(idx);
+        if (orderIdx !== -1) {
+          shufflePointerRef.current = orderIdx;
+        }
+      }
+    }
+
+    // Verify local file exists before playing
+    if (!checkAudioFileExists(vn.fileUri)) {
+      if (transitionTokenRef.current !== token) return;
+      Alert.alert(
+        'File Unavailable',
+        `Couldn't play "${vn.title}" because its local audio file is unavailable. Skipping to next valid track.`,
+        [{ text: 'OK' }]
+      );
+      await resolveNextTrack(false);
+      return;
+    }
+
+    // Save previous track's position if applicable
+    if (
+      !didJustFinishRef.current &&
+      currentVnRef.current &&
+      currentVnRef.current.id !== vn.id &&
+      clearedVnIdRef.current !== currentVnRef.current.id &&
+      currentTimeRef.current > 2 &&
+      durationRef.current &&
+      currentTimeRef.current < durationRef.current - 2
+    ) {
+      vnRepository.updateLastPosition(currentVnRef.current.id, currentTimeRef.current).catch(() => {});
+    }
+
+    if (transitionTokenRef.current !== token) return;
+
+    cleanupPlayer();
+    clearedVnIdRef.current = null;
+    didJustFinishRef.current = false;
+    setCurrentVn(vn);
+    currentVnRef.current = vn;
+
+    const initialPos =
+      startPosition > 1 && vn.duration && startPosition < vn.duration - 2 ? startPosition : 0;
+    setCurrentTime(initialPos);
+    currentTimeRef.current = initialPos;
+    lastSavedPositionRef.current = initialPos;
+    setDuration(vn.duration || 0);
+    durationRef.current = vn.duration || 0;
+    recordedRecentForTrackRef.current = null;
+
+    try {
+      const player = createAudioPlayer({ uri: vn.fileUri }, { updateInterval: 250 });
+
+      // Keep native player.loop false so expo-audio status fires didJustFinish reliably on all devices
+      try {
+        player.loop = false;
+      } catch {}
+
+      try {
+        player.setPlaybackRate(playbackRateRef.current);
+      } catch (e) {
+        console.warn('Could not set initial player.playbackRate:', e);
+      }
+
+      playerRef.current = player;
+      didJustFinishRef.current = false;
+
+      // Lock Screen & Notification media controls setup
+      const isExpoGo = Constants.appOwnership === 'expo';
+      if (!isExpoGo && typeof player.setActiveForLockScreen === 'function') {
+        try {
+          const activeTitle = (newContext || playbackContextRef.current)?.title || 'Our Voice';
+          player.setActiveForLockScreen(
+            true,
+            {
+              title: vn.title,
+              artist: 'Our Voice',
+              albumTitle: activeTitle,
+            },
+            {
+              showSeekForward: true,
+              showSeekBackward: true,
+            }
+          );
+          isLockScreenActiveRef.current = true;
+        } catch (lockErr) {
+          isLockScreenActiveRef.current = false;
+          console.warn('[LOCK SCREEN] Failed to set lock screen controls:', lockErr);
+        }
+      } else {
+        isLockScreenActiveRef.current = false;
+      }
+
+      if (initialPos > 0) {
+        try {
+          await player.seekTo(initialPos);
+        } catch (seekErr) {
+          console.warn('Could not seek to initial resume position:', seekErr);
+        }
+      }
+
+      if (transitionTokenRef.current !== token) {
+        // Newer transition was requested while preparing player
+        try {
+          player.remove();
+        } catch {}
+        return;
+      }
+
+      const sub = player.addListener('playbackStatusUpdate', (status) => {
+        if (status.isLoaded) {
+          const wasPlaying = isPlayingRef.current;
+          setIsPlaying(status.playing);
+          isPlayingRef.current = status.playing;
+          setCurrentTime(status.currentTime || 0);
+          currentTimeRef.current = status.currentTime || 0;
+
+          if (status.duration && status.duration > 0) {
+            setDuration(status.duration);
+            durationRef.current = status.duration;
+          }
+
+          // Immediate position save on pause
+          if (wasPlaying && !status.playing && !status.didJustFinish && !didJustFinishRef.current) {
+            if (
+              vn.id !== clearedVnIdRef.current &&
+              status.currentTime > 2 &&
+              status.duration &&
+              status.currentTime < status.duration - 2
+            ) {
+              lastSavedPositionRef.current = status.currentTime;
+              vnRepository.updateLastPosition(vn.id, status.currentTime).catch(() => {});
+              DeviceEventEmitter.emit('library_updated');
+            }
+          }
+
+          // Throttled Continue Listening persistence: every ~5 seconds of continuous playback
+          if (
+            status.playing &&
+            !status.didJustFinish &&
+            !didJustFinishRef.current &&
+            vn.id !== clearedVnIdRef.current &&
+            status.currentTime > 2 &&
+            status.duration &&
+            status.currentTime < status.duration - 2
+          ) {
+            if (Math.abs(status.currentTime - lastSavedPositionRef.current) >= 5) {
+              lastSavedPositionRef.current = status.currentTime;
+              vnRepository.updateLastPosition(vn.id, status.currentTime).catch(() => {});
+            }
+          }
+
+          // Record to Recently Played once playback reaches >= 3 seconds
+          if (
+            status.playing &&
+            status.currentTime >= 3 &&
+            recordedRecentForTrackRef.current !== vn.id
+          ) {
+            recordedRecentForTrackRef.current = vn.id;
+            recentlyPlayedRepository.recordPlay(vn.id).catch(() => {});
+          }
+
+          if (status.didJustFinish) {
+            didJustFinishRef.current = true;
+            resolveNextTrack(false);
+          }
+        }
+      });
+      subscriptionRef.current = sub;
+
+      player.play();
+      setIsPlaying(true);
+      isPlayingRef.current = true;
+    } catch (err: any) {
+      if (transitionTokenRef.current === token) {
+        Alert.alert('Playback Error', err?.message || 'Failed to play this audio file.');
+        cleanupPlayer();
+        setCurrentVn(null);
+        currentVnRef.current = null;
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+      }
+    }
   };
 
-  const shuffleAll = async (allVns?: VN[], customContext?: PlaybackContext) => {
+  /**
+   * PART 5 & 17 — Single Authoritative Next Track Decision Engine
+   * Deterministic priority order:
+   * 1. Sleep timer 'end_of_vn'
+   * 2. Repeat One (replays current track on natural finish; on explicit Next without queue, replays track)
+   * 3. Clear progress of finished track
+   * 4. Manual Queue (strict FIFO / insertion order, skips missing files safely)
+   * 5. Playback Context (Shuffle cycle or Sequential order, respecting Repeat All / Off)
+   * 6. Clean Stop if nothing playable remains
+   */
+  const resolveNextTrack = async (isManualNext: boolean = false) => {
+    const currentToken = ++transitionTokenRef.current;
+    const current = currentVnRef.current;
+
+    // Record to Recently Played if finished before 3 seconds
+    if (current && recordedRecentForTrackRef.current !== current.id) {
+      recordedRecentForTrackRef.current = current.id;
+      recentlyPlayedRepository.recordPlay(current.id).catch(() => {});
+    }
+
+    // 1. Sleep timer "End of VN" takes priority
+    if (sleepTimerTypeRef.current === 'end_of_vn') {
+      setSleepTimer('off');
+      didJustFinishRef.current = true;
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      setCurrentTime(0);
+      currentTimeRef.current = 0;
+      lastSavedPositionRef.current = 0;
+      if (current) {
+        clearedVnIdRef.current = current.id;
+        vnRepository.clearLastPosition(current.id).catch(() => {});
+        DeviceEventEmitter.emit('library_updated');
+      }
+      return;
+    }
+
+    // 2. Repeat One Handling: replays current track ONLY on natural finish (!isManualNext)
+    // Manual Next always advances to manual queue or next context track and NEVER traps the user.
+    if (
+      !isManualNext &&
+      repeatModeRef.current === 'one' &&
+      current &&
+      checkAudioFileExists(current.fileUri)
+    ) {
+      if (playerRef.current) {
+        try {
+          await playerRef.current.seekTo(0);
+          playerRef.current.play();
+          setIsPlaying(true);
+          isPlayingRef.current = true;
+          setCurrentTime(0);
+          currentTimeRef.current = 0;
+          lastSavedPositionRef.current = 0;
+          clearedVnIdRef.current = current.id;
+          vnRepository.clearLastPosition(current.id).catch(() => {});
+          DeviceEventEmitter.emit('library_updated');
+          return;
+        } catch (loopErr) {
+          console.warn('Error during repeat one replay:', loopErr);
+        }
+      }
+    }
+
+    // 3. Clear progress for naturally completed track
+    if (current) {
+      clearedVnIdRef.current = current.id;
+      lastSavedPositionRef.current = 0;
+      currentTimeRef.current = 0;
+      vnRepository.clearLastPosition(current.id).catch(() => {});
+      DeviceEventEmitter.emit('library_updated');
+    }
+
+    // 4. Manual Queue priority (deterministic FIFO)
+    while (manualQueueRef.current.length > 0) {
+      const nextVn = manualQueueRef.current[0];
+      const updatedQueue = manualQueueRef.current.slice(1);
+      manualQueueRef.current = updatedQueue;
+      setManualQueue(updatedQueue);
+
+      if (checkAudioFileExists(nextVn.fileUri)) {
+        if (current) addToHistory(current.id);
+        await playInternal(nextVn, 0, undefined, currentToken);
+        return;
+      }
+      // If candidate file is missing, silently consume and continue to next queue item
+    }
+
+    // 5. Current Playback Context continuation
+    const context = playbackContextRef.current;
+    if (context && context.items.length > 0) {
+      // If single-item context, do not loop unless repeat is 'all'
+      if (context.type === 'single') {
+        if (repeatModeRef.current === 'all') {
+          const candidate = context.items[0];
+          if (candidate && checkAudioFileExists(candidate.fileUri)) {
+            if (current) addToHistory(current.id);
+            await playInternal(candidate, 0, undefined, currentToken);
+            return;
+          }
+        }
+      } else if (isShuffleRef.current && shuffledOrderRef.current.length > 0) {
+        let nextPointer = shufflePointerRef.current + 1;
+        while (nextPointer < shuffledOrderRef.current.length) {
+          const nextIdx = shuffledOrderRef.current[nextPointer];
+          const candidate = context.items[nextIdx];
+          if (candidate && checkAudioFileExists(candidate.fileUri)) {
+            shufflePointerRef.current = nextPointer;
+            if (current) addToHistory(current.id);
+            await playInternal(candidate, 0, undefined, currentToken);
+            return;
+          }
+          nextPointer++;
+        }
+
+        // Reached end of shuffle cycle
+        if (repeatModeRef.current === 'all') {
+          const lastIdx = shuffledOrderRef.current[shuffledOrderRef.current.length - 1];
+          const reshuffled = generateReshuffledOrder(context.items.length, lastIdx);
+          shuffledOrderRef.current = reshuffled;
+          setShuffledOrder(reshuffled);
+          shufflePointerRef.current = 0;
+
+          let p = 0;
+          while (p < reshuffled.length) {
+            const candidate = context.items[reshuffled[p]];
+            if (candidate && checkAudioFileExists(candidate.fileUri)) {
+              shufflePointerRef.current = p;
+              if (current) addToHistory(current.id);
+              await playInternal(candidate, 0, undefined, currentToken);
+              return;
+            }
+            p++;
+          }
+        }
+      } else {
+        // Sequential Context
+        const currentId = current?.id;
+        const currentInContext = currentId ? context.items.findIndex((v) => v.id === currentId) : -1;
+        const currentIndex = currentInContext !== -1 ? currentInContext : lastContextIndexRef.current;
+        let searchIndex = currentIndex + 1;
+
+        while (searchIndex < context.items.length) {
+          const candidate = context.items[searchIndex];
+          if (candidate && checkAudioFileExists(candidate.fileUri)) {
+            lastContextIndexRef.current = searchIndex;
+            if (current) addToHistory(current.id);
+            await playInternal(candidate, 0, undefined, currentToken);
+            return;
+          }
+          searchIndex++;
+        }
+
+        // Reached end of sequential context
+        if (repeatModeRef.current === 'all') {
+          let wrapIndex = 0;
+          while (wrapIndex <= currentIndex && wrapIndex < context.items.length) {
+            const candidate = context.items[wrapIndex];
+            if (candidate && checkAudioFileExists(candidate.fileUri)) {
+              lastContextIndexRef.current = wrapIndex;
+              if (current) addToHistory(current.id);
+              await playInternal(candidate, 0, undefined, currentToken);
+              return;
+            }
+            wrapIndex++;
+          }
+        }
+      }
+    }
+
+    // 6. Repeat Off or end of context reached with nothing playable
+    didJustFinishRef.current = true;
+    setIsPlaying(false);
+    isPlayingRef.current = false;
+    setCurrentTime(0);
+    currentTimeRef.current = 0;
+    lastSavedPositionRef.current = 0;
+  };
+
+  /**
+   * PART 18 & 19 — Single Authoritative Previous Track Decision Engine
+   */
+  const resolvePreviousTrack = async (forcePrevious: boolean = false) => {
+    const currentToken = ++transitionTokenRef.current;
+
+    // Standard player rule: If current position > 3s and not forcing previous, restart track
+    if (!forcePrevious && currentTimeRef.current > 3 && playerRef.current) {
+      try {
+        await playerRef.current.seekTo(0);
+        setCurrentTime(0);
+        currentTimeRef.current = 0;
+        return;
+      } catch (e) {
+        console.warn('Error seeking to 0 on previous:', e);
+      }
+    }
+
+    // Check playback history stack first for deterministic back-navigation
+    const history = playbackHistoryRef.current;
+    while (history.length > 0) {
+      const prevId = history.pop();
+      if (prevId && prevId !== currentVnRef.current?.id) {
+        try {
+          const prevVn = await vnRepository.getVnById(prevId);
+          if (prevVn && checkAudioFileExists(prevVn.fileUri)) {
+            await playInternal(prevVn, 0, undefined, currentToken);
+            return;
+          }
+        } catch {}
+      }
+    }
+
+    // Fallback: Context-based previous track
+    const context = playbackContextRef.current;
+    if (context && context.items.length > 0) {
+      if (isShuffleRef.current && shuffledOrderRef.current.length > 0) {
+        if (shufflePointerRef.current > 0) {
+          shufflePointerRef.current -= 1;
+          const prevIdx = shuffledOrderRef.current[shufflePointerRef.current];
+          const candidate = context.items[prevIdx];
+          if (candidate && checkAudioFileExists(candidate.fileUri)) {
+            await playInternal(candidate, 0, undefined, currentToken);
+            return;
+          }
+        } else if (repeatModeRef.current === 'all') {
+          shufflePointerRef.current = shuffledOrderRef.current.length - 1;
+          const prevIdx = shuffledOrderRef.current[shufflePointerRef.current];
+          const candidate = context.items[prevIdx];
+          if (candidate && checkAudioFileExists(candidate.fileUri)) {
+            await playInternal(candidate, 0, undefined, currentToken);
+            return;
+          }
+        }
+      } else {
+        const currentId = currentVnRef.current?.id;
+        const currentIndex = currentId ? context.items.findIndex((v) => v.id === currentId) : -1;
+
+        if (currentIndex > 0) {
+          const candidate = context.items[currentIndex - 1];
+          if (candidate && checkAudioFileExists(candidate.fileUri)) {
+            await playInternal(candidate, 0, undefined, currentToken);
+            return;
+          }
+        } else if (currentIndex === 0 && repeatModeRef.current === 'all') {
+          const candidate = context.items[context.items.length - 1];
+          if (candidate && checkAudioFileExists(candidate.fileUri)) {
+            await playInternal(candidate, 0, undefined, currentToken);
+            return;
+          }
+        }
+      }
+    }
+
+    // Default fallback: restart current track
+    if (playerRef.current) {
+      try {
+        await playerRef.current.seekTo(0);
+        setCurrentTime(0);
+        currentTimeRef.current = 0;
+      } catch {}
+    }
+  };
+
+  playInternalRef.current = playInternal;
+  resolveNextTrackRef.current = resolveNextTrack;
+  resolvePreviousTrackRef.current = resolvePreviousTrack;
+
+  const playVn = useCallback(async (vn: VN, startPosition?: number, newContext?: PlaybackContext) => {
+    // If the same VN is already loaded, toggle pause/resume or handle seek
+    if (currentVnRef.current?.id === vn.id && playerRef.current) {
+      if (isPlayingRef.current) {
+        pauseRef.current();
+        return;
+      }
+      if (
+        startPosition !== undefined &&
+        startPosition > 0 &&
+        Math.abs(currentTimeRef.current - startPosition) > 2
+      ) {
+        await seekToRef.current(startPosition);
+      }
+      await resumeRef.current();
+      return;
+    }
+
+    // Record current track to history stack when navigating to a different track manually
+    if (currentVnRef.current && currentVnRef.current.id !== vn.id) {
+      addToHistory(currentVnRef.current.id);
+    }
+
+    await playInternalRef.current(vn, startPosition || 0, newContext);
+  }, [addToHistory]);
+
+  const playNextTrack = useCallback(async (_fromSwipe: boolean = false) => {
+    await resolveNextTrackRef.current(true);
+  }, []);
+  playNextTrackRef.current = playNextTrack;
+
+  const playPreviousTrack = useCallback(async (forcePrevious: boolean = false) => {
+    await resolvePreviousTrackRef.current(forcePrevious);
+  }, []);
+
+  const pause = useCallback(() => {
+    if (playerRef.current) {
+      playerRef.current.pause();
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+
+      if (
+        currentVnRef.current &&
+        currentTimeRef.current > 2 &&
+        durationRef.current &&
+        currentTimeRef.current < durationRef.current - 2
+      ) {
+        lastSavedPositionRef.current = currentTimeRef.current;
+        vnRepository
+          .updateLastPosition(currentVnRef.current.id, currentTimeRef.current)
+          .catch(() => {});
+        DeviceEventEmitter.emit('library_updated');
+      }
+    }
+  }, []);
+  pauseRef.current = pause;
+
+  const resume = useCallback(async () => {
+    if (playerRef.current) {
+      try {
+        if (didJustFinishRef.current || (durationRef.current > 0 && currentTimeRef.current >= durationRef.current - 0.5)) {
+          await playerRef.current.seekTo(0);
+          setCurrentTime(0);
+          currentTimeRef.current = 0;
+          didJustFinishRef.current = false;
+        }
+        playerRef.current.play();
+        setIsPlaying(true);
+        isPlayingRef.current = true;
+      } catch (err) {
+        console.warn('Error resuming playback:', err);
+      }
+    } else if (currentVnRef.current) {
+      await playInternalRef.current(currentVnRef.current, currentTimeRef.current);
+    }
+  }, []);
+  resumeRef.current = resume;
+
+  const togglePlayPause = useCallback(() => {
+    if (isPlayingRef.current) {
+      pauseRef.current();
+    } else {
+      resumeRef.current();
+    }
+  }, []);
+
+  const seekTo = useCallback(async (seconds: number) => {
+    if (playerRef.current) {
+      try {
+        didJustFinishRef.current = false;
+        await playerRef.current.seekTo(seconds);
+        setCurrentTime(seconds);
+        currentTimeRef.current = seconds;
+        lastSavedPositionRef.current = seconds;
+        if (currentVnRef.current) {
+          vnRepository.updateLastPosition(currentVnRef.current.id, seconds).catch(() => {});
+        }
+      } catch (err) {
+        console.warn('Seek error:', err);
+      }
+    }
+  }, []);
+  seekToRef.current = seekTo;
+
+  const stop = useCallback(() => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
+    setSleepTimerType('off');
+    sleepTimerTypeRef.current = 'off';
+    setSleepTimerRemaining(null);
+
+    if (
+      currentVnRef.current &&
+      currentTimeRef.current > 2 &&
+      durationRef.current &&
+      currentTimeRef.current < durationRef.current - 2
+    ) {
+      vnRepository.updateLastPosition(currentVnRef.current.id, currentTimeRef.current).catch(() => {});
+      DeviceEventEmitter.emit('library_updated');
+    }
+    cleanupPlayer();
+    setCurrentVn(null);
+    currentVnRef.current = null;
+    setIsPlaying(false);
+    isPlayingRef.current = false;
+    setCurrentTime(0);
+    currentTimeRef.current = 0;
+    setDuration(0);
+    durationRef.current = 0;
+  }, []);
+  stopRef.current = stop;
+
+  const stopIfPlaying = useCallback((vnId: string) => {
+    if (currentVnRef.current?.id === vnId) {
+      stop();
+    }
+  }, [stop]);
+
+  const shuffleAll = useCallback(async (allVns?: VN[], customContext?: PlaybackContext) => {
     let list = allVns;
     if (!list || list.length === 0) {
       try {
@@ -393,7 +1152,6 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
       return;
     }
 
-    // Filter to only items with local files present
     const validList = list.filter((item) => checkAudioFileExists(item.fileUri));
     if (validList.length === 0) {
       Alert.alert('No Files Available', 'Could not find local audio files for library recordings.');
@@ -421,676 +1179,164 @@ export function AudioPlayerProvider({ children }: { children: React.ReactNode })
     setShuffledOrder(order);
     shufflePointerRef.current = 0;
 
-    await playInternal(shuffled[0], 0, newContext);
-  };
+    await playInternalRef.current(shuffled[0], 0, newContext);
+  }, []);
 
-  const addAlbumToQueue = (vns: VN[]): { success: boolean; addedCount: number } => {
-    if (!vns || vns.length === 0) {
-      return { success: false, addedCount: 0 };
-    }
-    const existingQueueIds = new Set(manualQueueRef.current.map((v) => v.id));
-    const toAdd = vns.filter((v) => !existingQueueIds.has(v.id));
-    if (toAdd.length === 0) {
-      return { success: false, addedCount: 0 };
-    }
-    setManualQueue((prev) => [...prev, ...toAdd]);
-    return { success: true, addedCount: toAdd.length };
-  };
+  // Memoized Context Values
+  const stateValue = useMemo<AudioState>(
+    () => ({
+      currentVn,
+      isPlaying,
+      isLooping,
+      repeatMode,
+      isShuffle,
+      shuffledOrder,
+      playbackRate,
+      sleepTimerType,
+      sleepTimerRemaining,
+      manualQueue,
+      playbackContext,
+    }),
+    [
+      currentVn,
+      isPlaying,
+      isLooping,
+      repeatMode,
+      isShuffle,
+      shuffledOrder,
+      playbackRate,
+      sleepTimerType,
+      sleepTimerRemaining,
+      manualQueue,
+      playbackContext,
+    ]
+  );
 
-  const addToQueue = (vn: VN): { success: boolean; message: string } => {
-    if (manualQueueRef.current.some((item) => item.id === vn.id)) {
-      return { success: false, message: 'Already in queue' };
-    }
-    setManualQueue((prev) => [...prev, vn]);
-    return { success: true, message: `Added "${vn.title}" to queue` };
-  };
+  const progressValue = useMemo<AudioProgress>(
+    () => ({
+      currentTime,
+      duration,
+    }),
+    [currentTime, duration]
+  );
 
-  const playNext = (vn: VN): { success: boolean; message: string } => {
-    setManualQueue((prev) => [vn, ...prev.filter((item) => item.id !== vn.id)]);
-    return { success: true, message: `"${vn.title}" will play next` };
-  };
-
-  const removeFromQueue = (vnId: string) => {
-    setManualQueue((prev) => prev.filter((item) => item.id !== vnId));
-  };
-
-  const clearQueue = () => {
-    setManualQueue([]);
-  };
-
-  const moveQueueItem = (fromIndex: number, direction: 'up' | 'down') => {
-    setManualQueue((prev) => {
-      const toIndex = direction === 'up' ? fromIndex - 1 : fromIndex + 1;
-      if (toIndex < 0 || toIndex >= prev.length) return prev;
-      const next = [...prev];
-      const item = next.splice(fromIndex, 1)[0];
-      next.splice(toIndex, 0, item);
-      return next;
-    });
-  };
-
-  // Internal playback execution helper
-  const playInternal = async (
-    vn: VN,
-    startPosition: number = 0,
-    newContext?: PlaybackContext
-  ) => {
-    if (newContext) {
-      setPlaybackContextState(newContext);
-      playbackContextRef.current = newContext;
-      if (isShuffleRef.current && newContext.items.length > 0) {
-        const startIdx = newContext.items.findIndex((v) => v.id === vn.id);
-        const order = generateShuffledOrder(newContext.items.length, startIdx >= 0 ? startIdx : 0);
-        shuffledOrderRef.current = order;
-        setShuffledOrder(order);
-        shufflePointerRef.current = 0;
-      }
-    } else if (!playbackContextRef.current) {
-      // Default to All Songs context if none is active
-      try {
-        const allVns = await vnRepository.getAllVns();
-        const defaultCtx: PlaybackContext = {
-          type: 'all',
-          title: 'All Voice Notes',
-          items: allVns,
-        };
-        setPlaybackContextState(defaultCtx);
-        playbackContextRef.current = defaultCtx;
-        if (isShuffleRef.current && allVns.length > 0) {
-          const startIdx = allVns.findIndex((v) => v.id === vn.id);
-          const order = generateShuffledOrder(allVns.length, startIdx >= 0 ? startIdx : 0);
-          shuffledOrderRef.current = order;
-          setShuffledOrder(order);
-          shufflePointerRef.current = 0;
-        }
-      } catch (err) {
-        console.warn('Could not populate default playback context:', err);
-      }
-    } else if (isShuffleRef.current && playbackContextRef.current && playbackContextRef.current.items.length > 0) {
-      const trackIdx = playbackContextRef.current.items.findIndex((v) => v.id === vn.id);
-      if (trackIdx !== -1 && shuffledOrderRef.current.length > 0) {
-        const orderIdx = shuffledOrderRef.current.indexOf(trackIdx);
-        if (orderIdx !== -1) {
-          shufflePointerRef.current = orderIdx;
-        }
-      }
-    }
-
-    // Verify local file exists before playing
-    if (!checkAudioFileExists(vn.fileUri)) {
-      isBusyRef.current = false;
-      Alert.alert(
-        'File Unavailable',
-        `Couldn't play "${vn.title}" because its local audio file is unavailable. Skipping to next valid track.`,
-        [{ text: 'OK' }]
-      );
-      // Skip to next track safely
-      await playNextTrack();
-      return;
-    }
-
-    // Save previous track's position if applicable
-    if (
-      currentVnRef.current &&
-      currentVnRef.current.id !== vn.id &&
-      currentTimeRef.current > 2 &&
-      durationRef.current &&
-      currentTimeRef.current < durationRef.current - 2
-    ) {
-      vnRepository.updateLastPosition(currentVnRef.current.id, currentTimeRef.current).catch(() => {});
-    }
-
-    cleanupPlayer();
-    setCurrentVn(vn);
-    const initialPos =
-      startPosition > 1 && vn.duration && startPosition < vn.duration - 2 ? startPosition : 0;
-    setCurrentTime(initialPos);
-    currentTimeRef.current = initialPos;
-    lastSavedPositionRef.current = initialPos;
-    setDuration(vn.duration || 0);
-    recordedRecentForTrackRef.current = null;
-
-    try {
-      const player = createAudioPlayer({ uri: vn.fileUri }, { updateInterval: 250 });
-      try {
-        player.loop = isLoopingRef.current;
-      } catch (e) {
-        console.warn('Could not set initial player.loop:', e);
-      }
-
-      try {
-        player.setPlaybackRate(playbackRateRef.current);
-      } catch (e) {
-        console.warn('Could not set initial player.playbackRate:', e);
-      }
-
-      playerRef.current = player;
-      didJustFinishRef.current = false;
-
-      // Lock Screen & Notification media controls setup
-      try {
-        const activeTitle = (newContext || playbackContextRef.current)?.title || 'Our Voice';
-        player.setActiveForLockScreen(
-          true,
-          {
-            title: vn.title,
-            artist: 'Our Voice',
-            albumTitle: activeTitle,
-          },
-          {
-            showSeekForward: true,
-            showSeekBackward: true,
-          }
-        );
-      } catch (lockErr) {
-        console.warn('[LOCK SCREEN] Failed to set lock screen controls:', lockErr);
-      }
-
-      if (initialPos > 0) {
-        try {
-          await player.seekTo(initialPos);
-        } catch (seekErr) {
-          console.warn('Could not seek to initial resume position:', seekErr);
-        }
-      }
-
-      const sub = player.addListener('playbackStatusUpdate', (status) => {
-        if (status.isLoaded) {
-          setIsPlaying(status.playing);
-          setCurrentTime(status.currentTime || 0);
-          currentTimeRef.current = status.currentTime || 0;
-
-          if (status.duration && status.duration > 0) {
-            setDuration(status.duration);
-            durationRef.current = status.duration;
-          }
-
-          // Throttled Continue Listening persistence: save progress every ~4s of playback
-          if (
-            status.playing &&
-            status.currentTime > 2 &&
-            status.duration &&
-            status.currentTime < status.duration - 2
-          ) {
-            if (Math.abs(status.currentTime - lastSavedPositionRef.current) >= 4) {
-              lastSavedPositionRef.current = status.currentTime;
-              vnRepository.updateLastPosition(vn.id, status.currentTime).catch(() => {});
-            }
-          }
-
-          // Record to Recently Played once playback reaches >= 3 seconds
-          if (
-            status.playing &&
-            status.currentTime >= 3 &&
-            recordedRecentForTrackRef.current !== vn.id
-          ) {
-            recordedRecentForTrackRef.current = vn.id;
-            recentlyPlayedRepository.recordPlay(vn.id).catch(() => {});
-          }
-
-          if (status.didJustFinish) {
-            handleTrackFinish(vn);
-          }
-        }
-      });
-      subscriptionRef.current = sub;
-
-      player.play();
-      setIsPlaying(true);
-    } catch (err: any) {
-      Alert.alert('Playback Error', err?.message || 'Failed to play this audio file.');
-      cleanupPlayer();
-      setCurrentVn(null);
-      setIsPlaying(false);
-    } finally {
-      isBusyRef.current = false;
-    }
-  };
-
-  // Automatic transition when track naturally finishes
-  const handleTrackFinish = async (finishedVn: VN) => {
-    // Record to Recently Played if finished before 3 seconds
-    if (recordedRecentForTrackRef.current !== finishedVn.id) {
-      recordedRecentForTrackRef.current = finishedVn.id;
-      recentlyPlayedRepository.recordPlay(finishedVn.id).catch(() => {});
-    }
-
-    // 1. Sleep timer "End of VN" takes priority
-    if (sleepTimerTypeRef.current === 'end_of_vn') {
-      setSleepTimer('off');
-      didJustFinishRef.current = true;
-      setIsPlaying(false);
-      setCurrentTime(0);
-      currentTimeRef.current = 0;
-      lastSavedPositionRef.current = 0;
-      vnRepository.clearLastPosition(finishedVn.id).catch(() => {});
-      DeviceEventEmitter.emit('library_updated');
-      return;
-    }
-
-    // 2. Repeat One takes next priority
-    if (repeatModeRef.current === 'one') {
-      if (playerRef.current) {
-        try {
-          await playerRef.current.seekTo(0);
-          playerRef.current.play();
-          setIsPlaying(true);
-          setCurrentTime(0);
-          currentTimeRef.current = 0;
-          lastSavedPositionRef.current = 0;
-          vnRepository.clearLastPosition(finishedVn.id).catch(() => {});
-          DeviceEventEmitter.emit('library_updated');
-          return;
-        } catch (loopErr) {
-          console.warn('Error during repeat one replay:', loopErr);
-        }
-      }
-    }
-
-    // Clear progress for naturally completed track
-    vnRepository.clearLastPosition(finishedVn.id).catch(() => {});
-    DeviceEventEmitter.emit('library_updated');
-
-    // 3. Manual Queue has next priority
-    if (manualQueueRef.current.length > 0) {
-      const nextVn = manualQueueRef.current[0];
-      setManualQueue((prev) => prev.slice(1));
-      await playInternal(nextVn, 0);
-      return;
-    }
-
-    // 4. Current Playback Context continuation
-    const context = playbackContextRef.current;
-    if (context && context.items.length > 0) {
-      if (isShuffleRef.current && shuffledOrderRef.current.length > 0) {
-        const nextPointer = shufflePointerRef.current + 1;
-        if (nextPointer < shuffledOrderRef.current.length) {
-          shufflePointerRef.current = nextPointer;
-          const nextIdx = shuffledOrderRef.current[nextPointer];
-          if (nextIdx >= 0 && nextIdx < context.items.length) {
-            await playInternal(context.items[nextIdx], 0);
-            return;
-          }
-        } else if (repeatModeRef.current === 'all') {
-          // Reshuffle for new cycle
-          const lastIdx = shuffledOrderRef.current[shuffledOrderRef.current.length - 1];
-          const reshuffled = generateReshuffledOrder(context.items.length, lastIdx);
-          shuffledOrderRef.current = reshuffled;
-          setShuffledOrder(reshuffled);
-          shufflePointerRef.current = 0;
-          await playInternal(context.items[shuffledOrderRef.current[0]], 0);
-          return;
-        }
-      } else {
-        const currentIndex = context.items.findIndex((v) => v.id === finishedVn.id);
-        if (currentIndex !== -1 && currentIndex + 1 < context.items.length) {
-          const nextVn = context.items[currentIndex + 1];
-          await playInternal(nextVn, 0);
-          return;
-        } else if (repeatModeRef.current === 'all') {
-          // Wrap to the beginning of the context
-          const firstVn = context.items[0];
-          await playInternal(firstVn, 0);
-          return;
-        }
-      }
-    }
-
-    // 5. Repeat Off or end of context reached with no repeat
-    didJustFinishRef.current = true;
-    setIsPlaying(false);
-    setCurrentTime(0);
-    currentTimeRef.current = 0;
-    lastSavedPositionRef.current = 0;
-  };
-
-  const playVn = async (vn: VN, startPosition?: number, newContext?: PlaybackContext) => {
-    // If the same VN is already loaded, toggle pause/resume or handle seek
-    if (currentVnRef.current?.id === vn.id && playerRef.current) {
-      if (isPlaying) {
-        pause();
-        return;
-      }
-      if (
-        startPosition !== undefined &&
-        startPosition > 0 &&
-        Math.abs(currentTimeRef.current - startPosition) > 2
-      ) {
-        await seekTo(startPosition);
-      }
-      resume();
-      return;
-    }
-
-    if (isBusyRef.current) return;
-    isBusyRef.current = true;
-
-    await playInternal(vn, startPosition || 0, newContext);
-  };
-
-  const playNextTrack = async (fromSwipe: boolean = false) => {
-    if (isBusyRef.current) return;
-
-    // Repeat One rule: do NOT move to another song
-    if (repeatModeRef.current === 'one' && currentVnRef.current) {
-      if (playerRef.current) {
-        try {
-          await playerRef.current.seekTo(0);
-          playerRef.current.play();
-          setIsPlaying(true);
-          setCurrentTime(0);
-          currentTimeRef.current = 0;
-        } catch (e) {
-          console.warn('Error in repeat-one Next:', e);
-        }
-      }
-      return;
-    }
-
-    isBusyRef.current = true;
-
-    // 1. Manual Queue priority
-    if (manualQueueRef.current.length > 0) {
-      const nextVn = manualQueueRef.current[0];
-      setManualQueue((prev) => prev.slice(1));
-      await playInternal(nextVn, 0);
-      return;
-    }
-
-    // 2. Playback Context priority
-    const context = playbackContextRef.current;
-    if (context && context.items.length > 0) {
-      if (isShuffleRef.current && shuffledOrderRef.current.length > 0) {
-        const nextPointer = shufflePointerRef.current + 1;
-        if (nextPointer < shuffledOrderRef.current.length) {
-          shufflePointerRef.current = nextPointer;
-          const nextIdx = shuffledOrderRef.current[nextPointer];
-          if (nextIdx >= 0 && nextIdx < context.items.length) {
-            await playInternal(context.items[nextIdx], 0);
-            return;
-          }
-        } else if (repeatModeRef.current === 'all') {
-          const lastIdx = shuffledOrderRef.current[shuffledOrderRef.current.length - 1];
-          const reshuffled = generateReshuffledOrder(context.items.length, lastIdx);
-          shuffledOrderRef.current = reshuffled;
-          setShuffledOrder(reshuffled);
-          shufflePointerRef.current = 0;
-          await playInternal(context.items[shuffledOrderRef.current[0]], 0);
-          return;
-        } else if (repeatModeRef.current === 'off') {
-          pause();
-          isBusyRef.current = false;
-          return;
-        }
-      } else {
-        const currentId = currentVnRef.current?.id;
-        const currentIndex = currentId
-          ? context.items.findIndex((v) => v.id === currentId)
-          : -1;
-
-        if (currentIndex !== -1 && currentIndex + 1 < context.items.length) {
-          await playInternal(context.items[currentIndex + 1], 0);
-          return;
-        } else if (repeatModeRef.current === 'all') {
-          await playInternal(context.items[0], 0);
-          return;
-        } else if (repeatModeRef.current === 'off') {
-          // Stop cleanly at end
-          pause();
-          isBusyRef.current = false;
-          return;
-        }
-      }
-    } else {
-      // Fallback: load all VNs if no context
-      try {
-        const allVns = await vnRepository.getAllVns();
-        if (allVns.length > 0) {
-          const currentId = currentVnRef.current?.id;
-          const idx = currentId ? allVns.findIndex((v) => v.id === currentId) : -1;
-          const nextIdx = idx !== -1 && idx + 1 < allVns.length ? idx + 1 : 0;
-          await playInternal(allVns[nextIdx], 0, {
-            type: 'all',
-            title: 'All Voice Notes',
-            items: allVns,
-          });
-          return;
-        }
-      } catch (err) {
-        console.warn('Fallback playNextTrack failed:', err);
-      }
-    }
-
-    isBusyRef.current = false;
-  };
-
-  const playPreviousTrack = async (forcePrevious: boolean = false) => {
-    if (isBusyRef.current) return;
-
-    // Standard player rule: If current position > 3s and not forcing previous, restart track
-    if (!forcePrevious && currentTimeRef.current > 3 && playerRef.current) {
-      try {
-        await playerRef.current.seekTo(0);
-        setCurrentTime(0);
-        currentTimeRef.current = 0;
-      } catch (e) {
-        console.warn('Error seeking to 0 on previous:', e);
-      }
-      return;
-    }
-
-    isBusyRef.current = true;
-
-    // Check context for previous track
-    const context = playbackContextRef.current;
-    if (context && context.items.length > 0) {
-      if (isShuffleRef.current && shuffledOrderRef.current.length > 0) {
-        if (shufflePointerRef.current > 0) {
-          shufflePointerRef.current -= 1;
-          const prevIdx = shuffledOrderRef.current[shufflePointerRef.current];
-          if (prevIdx >= 0 && prevIdx < context.items.length) {
-            await playInternal(context.items[prevIdx], 0);
-            return;
-          }
-        } else if (repeatModeRef.current === 'all') {
-          shufflePointerRef.current = shuffledOrderRef.current.length - 1;
-          const prevIdx = shuffledOrderRef.current[shufflePointerRef.current];
-          if (prevIdx >= 0 && prevIdx < context.items.length) {
-            await playInternal(context.items[prevIdx], 0);
-            return;
-          }
-        } else {
-          // Seek to 0
-          if (playerRef.current) {
-            await playerRef.current.seekTo(0);
-            setCurrentTime(0);
-            currentTimeRef.current = 0;
-          }
-          isBusyRef.current = false;
-          return;
-        }
-      } else {
-        const currentId = currentVnRef.current?.id;
-        const currentIndex = currentId
-          ? context.items.findIndex((v) => v.id === currentId)
-          : -1;
-
-        if (currentIndex > 0) {
-          await playInternal(context.items[currentIndex - 1], 0);
-          return;
-        } else if (currentIndex === 0) {
-          if (repeatModeRef.current === 'all') {
-            await playInternal(context.items[context.items.length - 1], 0);
-            return;
-          } else {
-            // Stay on first track and seek to 0
-            if (playerRef.current) {
-              await playerRef.current.seekTo(0);
-              setCurrentTime(0);
-              currentTimeRef.current = 0;
-            }
-            isBusyRef.current = false;
-            return;
-          }
-        }
-      }
-    }
-
-    // Default fallback: restart current track
-    if (playerRef.current) {
-      try {
-        await playerRef.current.seekTo(0);
-        setCurrentTime(0);
-        currentTimeRef.current = 0;
-      } catch {}
-    }
-    isBusyRef.current = false;
-  };
-
-  const pause = () => {
-    if (playerRef.current) {
-      playerRef.current.pause();
-      setIsPlaying(false);
-
-      // Save position immediately when paused
-      if (
-        currentVnRef.current &&
-        currentTimeRef.current > 2 &&
-        durationRef.current &&
-        currentTimeRef.current < durationRef.current - 2
-      ) {
-        lastSavedPositionRef.current = currentTimeRef.current;
-        vnRepository
-          .updateLastPosition(currentVnRef.current.id, currentTimeRef.current)
-          .catch(() => {});
-        DeviceEventEmitter.emit('library_updated');
-      }
-    }
-  };
-
-  const resume = async () => {
-    if (playerRef.current) {
-      try {
-        // If reached the end or finished, seek to start before replaying
-        if (didJustFinishRef.current || (duration > 0 && currentTime >= duration - 0.5)) {
-          await playerRef.current.seekTo(0);
-          setCurrentTime(0);
-          currentTimeRef.current = 0;
-          didJustFinishRef.current = false;
-        }
-        playerRef.current.play();
-        setIsPlaying(true);
-      } catch (err) {
-        console.warn('Error resuming playback:', err);
-      }
-    } else if (currentVnRef.current) {
-      await playInternal(currentVnRef.current, currentTimeRef.current);
-    }
-  };
-
-  const togglePlayPause = () => {
-    if (isPlaying) {
-      pause();
-    } else {
-      resume();
-    }
-  };
-
-  const seekTo = async (seconds: number) => {
-    if (playerRef.current) {
-      try {
-        didJustFinishRef.current = false;
-        await playerRef.current.seekTo(seconds);
-        setCurrentTime(seconds);
-        currentTimeRef.current = seconds;
-        lastSavedPositionRef.current = seconds;
-        if (currentVnRef.current) {
-          vnRepository.updateLastPosition(currentVnRef.current.id, seconds).catch(() => {});
-        }
-      } catch (err) {
-        console.warn('Seek error:', err);
-      }
-    }
-  };
-
-  const stop = () => {
-    if (timerIntervalRef.current) {
-      clearInterval(timerIntervalRef.current);
-      timerIntervalRef.current = null;
-    }
-    setSleepTimerType('off');
-    sleepTimerTypeRef.current = 'off';
-    setSleepTimerRemaining(null);
-
-    // If stopping before finish, preserve lastPosition if meaningful
-    if (
-      currentVnRef.current &&
-      currentTimeRef.current > 2 &&
-      durationRef.current &&
-      currentTimeRef.current < durationRef.current - 2
-    ) {
-      vnRepository.updateLastPosition(currentVnRef.current.id, currentTimeRef.current).catch(() => {});
-      DeviceEventEmitter.emit('library_updated');
-    }
-    cleanupPlayer();
-    setCurrentVn(null);
-    setIsPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
-  };
-  stopRef.current = stop;
+  const actionsValue = useMemo<AudioActions>(
+    () => ({
+      playVn,
+      pause,
+      resume,
+      togglePlayPause,
+      toggleLoop,
+      setRepeatMode,
+      cycleRepeatMode,
+      toggleShuffle,
+      shuffleAll,
+      addAlbumToQueue,
+      setPlaybackRate,
+      setSleepTimer,
+      seekTo,
+      stop,
+      updateCurrentVnMetadata,
+      stopIfPlaying,
+      setPlaybackContext,
+      addToQueue,
+      playNext,
+      removeFromQueue,
+      clearQueue,
+      moveQueueItem,
+      playNextTrack,
+      playPreviousTrack,
+    }),
+    [
+      playVn,
+      pause,
+      resume,
+      togglePlayPause,
+      toggleLoop,
+      setRepeatMode,
+      cycleRepeatMode,
+      toggleShuffle,
+      shuffleAll,
+      addAlbumToQueue,
+      setPlaybackRate,
+      setSleepTimer,
+      seekTo,
+      stop,
+      updateCurrentVnMetadata,
+      stopIfPlaying,
+      setPlaybackContext,
+      addToQueue,
+      playNext,
+      removeFromQueue,
+      clearQueue,
+      moveQueueItem,
+      playNextTrack,
+      playPreviousTrack,
+    ]
+  );
 
   return (
-    <AudioContext.Provider
-      value={{
-        currentVn,
-        isPlaying,
-        currentTime,
-        duration,
-        isLooping,
-        repeatMode,
-        isShuffle,
-        shuffledOrder,
-        playbackRate,
-        sleepTimerType,
-        sleepTimerRemaining,
-        manualQueue,
-        playbackContext,
-        playVn,
-        pause,
-        resume,
-        togglePlayPause,
-        toggleLoop,
-        setRepeatMode,
-        cycleRepeatMode,
-        toggleShuffle,
-        shuffleAll,
-        addAlbumToQueue,
-        setPlaybackRate,
-        setSleepTimer,
-        seekTo,
-        stop,
-        updateCurrentVnMetadata,
-        stopIfPlaying,
-        setPlaybackContext,
-        addToQueue,
-        playNext,
-        removeFromQueue,
-        clearQueue,
-        moveQueueItem,
-        playNextTrack,
-        playPreviousTrack,
-      }}>
-      {children}
-    </AudioContext.Provider>
+    <AudioActionsContext.Provider value={actionsValue}>
+      <AudioStateContext.Provider value={stateValue}>
+        <AudioProgressContext.Provider value={progressValue}>
+          {children}
+        </AudioProgressContext.Provider>
+      </AudioStateContext.Provider>
+    </AudioActionsContext.Provider>
   );
 }
 
-export function useAudio() {
-  const context = useContext(AudioContext);
+/**
+ * Returns stable actions (playVn, addToQueue, playNext, etc.).
+ * Guarantees 0 re-renders on playback time ticks!
+ */
+export function useAudioActions(): AudioActions {
+  const context = useContext(AudioActionsContext);
   if (!context) {
-    throw new Error('useAudio must be used within an AudioPlayerProvider');
+    throw new Error('useAudioActions must be used within an AudioPlayerProvider');
   }
   return context;
 }
 
+/**
+ * Returns slow-moving playback state (currentVn, isPlaying, manualQueue, repeatMode, etc.).
+ * Does NOT subscribe to 250ms position updates!
+ */
+export function useAudioState(): AudioState {
+  const context = useContext(AudioStateContext);
+  if (!context) {
+    throw new Error('useAudioState must be used within an AudioPlayerProvider');
+  }
+  return context;
+}
+
+/**
+ * Returns high-frequency playback progress (currentTime, duration).
+ * Used only by progress bars and scrubbers.
+ */
+export function useAudioProgress(): AudioProgress {
+  const context = useContext(AudioProgressContext);
+  if (!context) {
+    throw new Error('useAudioProgress must be used within an AudioPlayerProvider');
+  }
+  return context;
+}
+
+/**
+ * Complete Audio Context combining State, Progress, and Actions.
+ * 100% backward compatible with existing screens.
+ */
+export function useAudio(): AudioContextType {
+  const state = useAudioState();
+  const progress = useAudioProgress();
+  const actions = useAudioActions();
+
+  return useMemo(
+    () => ({
+      ...state,
+      ...progress,
+      ...actions,
+    }),
+    [state, progress, actions]
+  );
+}

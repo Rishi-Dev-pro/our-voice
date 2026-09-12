@@ -30,7 +30,7 @@ import { recentlyPlayedRepository } from '@/database/repositories/recentlyPlayed
 import { vnService } from '@/services/vnService';
 import { packageService } from '@/services/packageService';
 import { VN } from '@/types/vn';
-import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
+import { useAudioState, useAudioActions, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
 import { MiniPlayer } from '@/components/mini-player';
 import { AddToAlbumModal } from '@/components/add-to-album-modal';
@@ -42,6 +42,8 @@ import { TeddyColors } from '@/constants/theme';
 import { preferencesService } from '@/services/preferencesService';
 import { teddyReactionService } from '@/services/teddyReactionService';
 import { teddyPickerService } from '@/services/teddyPickerService';
+import { TeddyRecommendationModal } from '@/components/teddy-recommendation-modal';
+import { checkAudioFileExists } from '@/services/fileService';
 import { formatDuration } from '@/utils/format';
 
 export default function LibraryScreen() {
@@ -64,9 +66,13 @@ export default function LibraryScreen() {
   const [renameTargetVn, setRenameTargetVn] = useState<VN | null>(null);
   const [renameInput, setRenameInput] = useState('');
 
+  // Teddy Shake Recommendation overlay state
+  const [recommendedVn, setRecommendedVn] = useState<VN | null>(null);
+
   const [selectedTab, setSelectedTab] = useState<'all' | 'recorded' | 'imported'>('all');
 
-  const { currentVn, isPlaying, playVn, pause, resume, updateCurrentVnMetadata, shuffleAll } = useAudio();
+  const { currentVn, isPlaying } = useAudioState();
+  const { playVn, pause, resume, updateCurrentVnMetadata, shuffleAll } = useAudioActions();
   const router = useRouter();
 
   // Shake & interaction guards
@@ -77,8 +83,9 @@ export default function LibraryScreen() {
   useEffect(() => {
     isPlayingRef.current = isPlaying;
     isTypingRef.current = searchQuery.length > 0;
-    isModalOpenRef.current = albumModalVn !== null || renameTargetVn !== null;
-  }, [isPlaying, searchQuery, albumModalVn, renameTargetVn]);
+    isModalOpenRef.current =
+      albumModalVn !== null || renameTargetVn !== null || recommendedVn !== null;
+  }, [isPlaying, searchQuery, albumModalVn, renameTargetVn, recommendedVn]);
 
   const lastShakeTimeRef = useRef(0);
   const isSurprisingRef = useRef(false);
@@ -104,6 +111,22 @@ export default function LibraryScreen() {
     }
   }, []);
 
+  const handleCloseRecommendation = useCallback(() => {
+    setRecommendedVn(null);
+  }, []);
+
+  const handlePlayRecommendation = useCallback(
+    (vn: VN) => {
+      setRecommendedVn(null);
+      if (!checkAudioFileExists(vn.fileUri)) {
+        Alert.alert('File Unavailable', "This keepsake's audio file is no longer available.");
+        return;
+      }
+      router.push(`/player/${vn.id}` as any);
+    },
+    [router]
+  );
+
   const handleAccelerometerData = useCallback(
     (data: { x: number; y: number; z: number }) => {
       const magnitude = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
@@ -112,15 +135,13 @@ export default function LibraryScreen() {
       // Robust shake threshold: spike deviation > 1.1G or total magnitude > 2.2G
       if (delta > 1.1 || magnitude > 2.2) {
         const now = Date.now();
-        // 1. 5-second cooldown
-        if (now - lastShakeTimeRef.current < 5000) return;
-        // 2. Strict guard: never interrupt active playback
-        if (isPlayingRef.current) return;
-        // 3. Strict guard: never interrupt while user is typing
+        // 1. Debounce / cooldown: 3.5s
+        if (now - lastShakeTimeRef.current < 3500) return;
+        // 2. Strict guard: never interrupt while user is typing in search
         if (isTypingRef.current) return;
-        // 4. Strict guard: never interrupt open modals / action sheets
+        // 3. Strict guard: never interrupt if another modal or recommendation is already open
         if (isModalOpenRef.current) return;
-        // 5. Prevent double surprise triggers
+        // 4. Prevent duplicate triggers
         if (isSurprisingRef.current) return;
 
         lastShakeTimeRef.current = now;
@@ -130,8 +151,11 @@ export default function LibraryScreen() {
           .pickVoiceNote(currentVn?.id)
           .then((result) => {
             if (result.status === 'success') {
+              // CRITICAL AUDIO RULE: DO NOT start playback automatically!
+              // DO NOT call play() or router.push() here!
+              // Instead, display the Teddy recommendation overlay with the fixed selected VN
+              setRecommendedVn(result.vn);
               teddyReactionService.trigger('SHAKE_SURPRISE');
-              router.push(`/player/${result.vn.id}` as any);
             } else if (result.status === 'empty') {
               teddyReactionService.trigger('EMPTY_LIBRARY');
             } else if (result.status === 'no_valid_audio') {
@@ -142,16 +166,16 @@ export default function LibraryScreen() {
             }
           })
           .catch((err) => {
-            console.warn('[SHAKE SURPRISE] Pick error:', err);
+            console.warn('[SHAKE RECOMMENDATION] Pick error:', err);
           })
           .finally(() => {
             setTimeout(() => {
               isSurprisingRef.current = false;
-            }, 1500);
+            }, 1200);
           });
       }
     },
-    [currentVn?.id, router]
+    [currentVn?.id]
   );
 
   useFocusEffect(
@@ -266,16 +290,22 @@ export default function LibraryScreen() {
   };
 
   const handlePlayMainTrack = (track: VN) => {
-    const ctx: PlaybackContext = {
-      type: 'all',
-      title:
-        selectedTab === 'recorded'
-          ? 'Recorded Keepsakes'
-          : selectedTab === 'imported'
-          ? 'Imported Songs'
-          : 'All Voice Notes',
-      items: filteredVns,
-    };
+    const ctx: PlaybackContext = searchQuery.trim()
+      ? {
+          type: 'search',
+          title: `Search: "${searchQuery.trim()}"`,
+          items: filteredVns,
+        }
+      : {
+          type: 'all',
+          title:
+            selectedTab === 'recorded'
+              ? 'Recorded Keepsakes'
+              : selectedTab === 'imported'
+              ? 'Imported Songs'
+              : 'All Voice Notes',
+          items: filteredVns,
+        };
     playVn(track, 0, ctx);
   };
 
@@ -412,6 +442,7 @@ export default function LibraryScreen() {
       if (currentVn?.id === renameTargetVn.id) {
         updateCurrentVnMetadata({ title: trimmed });
       }
+      DeviceEventEmitter.emit('vn_metadata_updated', { id: renameTargetVn.id, updates: { title: trimmed } });
       DeviceEventEmitter.emit('library_updated');
       setRenameTargetVn(null);
     } catch (err: any) {
@@ -669,7 +700,13 @@ export default function LibraryScreen() {
                               teddyReactionService.trigger('CONTINUE_LISTENING');
                             }
                           } else {
-                            playVn(continueListeningVn, continueListeningVn.lastPosition);
+                            const singleCtx: PlaybackContext = {
+                              type: 'single',
+                              id: continueListeningVn.id,
+                              title: continueListeningVn.title,
+                              items: [continueListeningVn],
+                            };
+                            playVn(continueListeningVn, continueListeningVn.lastPosition, singleCtx);
                             teddyReactionService.trigger('CONTINUE_LISTENING');
                           }
                         }}>
@@ -1058,6 +1095,14 @@ export default function LibraryScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {/* Teddy Shake Recommendation Overlay */}
+      <TeddyRecommendationModal
+        visible={recommendedVn !== null}
+        vn={recommendedVn}
+        onClose={handleCloseRecommendation}
+        onPlay={handlePlayRecommendation}
+      />
     </SafeAreaView>
   );
 }

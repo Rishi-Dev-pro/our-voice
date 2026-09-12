@@ -102,13 +102,6 @@ export const vnService = {
       throw new Error('Selected file is not a supported audio format.');
     }
 
-    // Development logging as requested
-    console.log('[VN IMPORT]');
-    console.log('picker URI:', asset.uri);
-    console.log('picker name:', asset.name);
-    console.log('picker MIME type:', asset.mimeType);
-    console.log('picker size:', asset.size);
-
     // Unique ID for the voice note
     const id = 'vn_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 7);
     
@@ -140,8 +133,6 @@ export const vnService = {
         createdAt: Date.now(),
         isLiked: false,
       });
-
-      console.log('[VN IMPORT] SQLite fileUri:', vn.fileUri);
 
       return vn;
     } catch (err) {

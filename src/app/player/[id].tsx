@@ -110,29 +110,40 @@ export default function PlayerScreen() {
   }, [isPlaying]);
 
   // Signature Apple Music Artwork Scaling Animation:
-  // When playing: scale 1.0; when paused: scale 0.86
-  const artworkScale = useSharedValue(isPlaying ? 1.0 : 0.86);
+  // When playing: scale 1.0; when paused: scale 0.88
+  const artworkScale = useSharedValue(isPlaying ? 1.0 : 0.88);
+  const artworkTranslateX = useSharedValue(0);
 
   useEffect(() => {
-    artworkScale.value = withSpring(isPlaying ? 1.0 : 0.86, {
-      damping: 15,
-      stiffness: 120,
+    artworkScale.value = withSpring(isPlaying ? 1.0 : 0.88, {
+      damping: 18,
+      stiffness: 110,
+      mass: 0.9,
     });
   }, [isPlaying, artworkScale]);
 
   const animatedArtworkStyle = useAnimatedStyle(() => {
     return {
-      transform: [{ scale: artworkScale.value }],
+      transform: [
+        { translateX: artworkTranslateX.value },
+        { scale: artworkScale.value },
+      ],
     };
   });
 
   const hasAutoPlayedRef = useRef(false);
+  const currentVnRef = useRef(currentVn);
+
+  useEffect(() => {
+    currentVnRef.current = currentVn;
+  }, [currentVn]);
 
   useEffect(() => {
     let isMounted = true;
 
     // If audio player already has this track active, no DB fetch needed
-    if (currentVn && currentVn.id === vnId) {
+    if (currentVnRef.current && currentVnRef.current.id === vnId) {
+      setLoading(false);
       return;
     }
 
@@ -158,7 +169,7 @@ export default function PlayerScreen() {
     return () => {
       isMounted = false;
     };
-  }, [vnId, currentVn]);
+  }, [vnId, playVn]);
 
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('library_updated', async () => {
@@ -180,19 +191,34 @@ export default function PlayerScreen() {
         onStartShouldSetPanResponder: () => false,
         onMoveShouldSetPanResponder: (_, gestureState) => {
           return (
-            Math.abs(gestureState.dx) > 30 &&
-            Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5
+            Math.abs(gestureState.dx) > 15 &&
+            Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.4
           );
         },
+        onPanResponderMove: (_, gestureState) => {
+          artworkTranslateX.value = gestureState.dx * 0.55;
+        },
         onPanResponderRelease: (_, gestureState) => {
-          if (gestureState.dx < -50) {
+          if (gestureState.dx < -60) {
             playNextTrack(true);
-          } else if (gestureState.dx > 50) {
+          } else if (gestureState.dx > 60) {
             playPreviousTrack(true);
           }
+          artworkTranslateX.value = withSpring(0, {
+            damping: 18,
+            stiffness: 180,
+            mass: 0.8,
+          });
+        },
+        onPanResponderTerminate: () => {
+          artworkTranslateX.value = withSpring(0, {
+            damping: 18,
+            stiffness: 180,
+            mass: 0.8,
+          });
         },
       }),
-    [playNextTrack, playPreviousTrack]
+    [playNextTrack, playPreviousTrack, artworkTranslateX]
   );
 
   const activeDuration = duration || vn?.duration || 0;
@@ -336,6 +362,7 @@ export default function PlayerScreen() {
       if (currentVn?.id === vn.id) {
         updateCurrentVnMetadata({ title: trimmed });
       }
+      DeviceEventEmitter.emit('vn_metadata_updated', { id: vn.id, updates: { title: trimmed } });
       DeviceEventEmitter.emit('library_updated');
       setRenameModalVisible(false);
     } catch (err: any) {

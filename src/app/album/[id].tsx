@@ -18,15 +18,14 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { albumRepository } from '@/database/repositories/albumRepository';
 import { vnRepository } from '@/database/repositories/vnRepository';
 import { Album, VN } from '@/types/vn';
-import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
+import { useAudioState, useAudioActions, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
 import { MiniPlayer } from '@/components/mini-player';
 import { AppleArtwork } from '@/components/apple-artwork';
 import { useTheme } from '@/hooks/use-theme';
-import { teddyReactionService } from '@/services/teddyReactionService';
-
 import { packageService } from '@/services/packageService';
 import { sharingService } from '@/services/sharingService';
+import { teddyReactionService } from '@/services/teddyReactionService';
 
 export default function AlbumDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -41,7 +40,8 @@ export default function AlbumDetailScreen() {
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [availableVns, setAvailableVns] = useState<VN[]>([]);
 
-  const { currentVn, isPlaying, playVn, shuffleAll, addAlbumToQueue, updateCurrentVnMetadata } = useAudio();
+  const { currentVn, isPlaying } = useAudioState();
+  const { playVn, shuffleAll, addAlbumToQueue, updateCurrentVnMetadata } = useAudioActions();
   const router = useRouter();
   const theme = useTheme();
 
@@ -168,6 +168,7 @@ export default function AlbumDetailScreen() {
 
   // Apple Music "Play All" Action
   function handlePlayAll() {
+    if (!album) return;
     if (vns.length > 0) {
       playVn(vns[0], 0, albumContext);
     }
@@ -175,13 +176,14 @@ export default function AlbumDetailScreen() {
 
   // Apple Music "Shuffle" Action
   function handleShufflePlay() {
+    if (!album) return;
     if (vns.length > 0) {
       shuffleAll(vns, albumContext);
     }
   }
 
   async function handleExportAlbum() {
-    if (!albumId || vns.length === 0) {
+    if (!album || !albumId || vns.length === 0) {
       Alert.alert('Empty Album', 'Add recordings to this album before exporting.');
       return;
     }
@@ -190,7 +192,8 @@ export default function AlbumDetailScreen() {
       const packageUri = await packageService.exportAlbumPackage(albumId);
       await sharingService.shareFile(
         packageUri,
-        `Share Album "${album?.name || 'Album'}" (.ovp)`
+        `Share Album "${album.name || 'Album'}" (.ovp)`,
+        'application/vnd.ourvoice.ovp'
       );
     } catch (err: any) {
       Alert.alert('Export Failed', err?.message || 'Could not export album package.');
@@ -200,7 +203,7 @@ export default function AlbumDetailScreen() {
   }
 
   function handleAddAlbumToQueue() {
-    if (vns.length === 0) return;
+    if (!album || vns.length === 0) return;
     const res = addAlbumToQueue(vns);
     if (res.addedCount > 0) {
       Alert.alert(
@@ -214,6 +217,7 @@ export default function AlbumDetailScreen() {
   }
 
   function handlePlayTrack(track: VN) {
+    if (!album) return;
     playVn(track, 0, albumContext);
   }
 
@@ -229,21 +233,40 @@ export default function AlbumDetailScreen() {
           <Text style={[styles.backText, { color: theme.tint }]}>Albums</Text>
         </Pressable>
 
-        <Pressable
-          style={({ pressed }) => [
-            styles.addTopBtn,
-            pressed && { opacity: 0.6 },
-          ]}
-          onPress={openAddModal}>
-          <Ionicons name="add" size={22} color={theme.tint} />
-          <Text style={[styles.addTopText, { color: theme.tint }]}>Add</Text>
-        </Pressable>
+        {album && (
+          <Pressable
+            style={({ pressed }) => [
+              styles.addTopBtn,
+              pressed && { opacity: 0.6 },
+            ]}
+            onPress={openAddModal}>
+            <Ionicons name="add" size={22} color={theme.tint} />
+            <Text style={[styles.addTopText, { color: theme.tint }]}>Add</Text>
+          </Pressable>
+        )}
       </View>
 
       {/* VN List with Hero Album Header */}
       {loading ? (
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={theme.tint} />
+        </View>
+      ) : !album ? (
+        <View style={styles.centered}>
+          <Ionicons name="folder-open-outline" size={48} color={theme.textSecondary} />
+          <Text style={[styles.emptyTitle, { color: theme.text, marginTop: 12 }]}>Album Not Found</Text>
+          <Text style={[styles.emptySubtitle, { color: theme.textSecondary, textAlign: 'center', marginHorizontal: 24, marginTop: 6 }]}>
+            This album may have been deleted.
+          </Text>
+          <Pressable
+            style={({ pressed }) => [
+              styles.actionPill,
+              { backgroundColor: theme.backgroundElement, marginTop: 16, paddingHorizontal: 20 },
+              pressed && { opacity: 0.75 },
+            ]}
+            onPress={() => (router.canGoBack() ? router.back() : router.replace('/albums'))}>
+            <Text style={[styles.actionPillText, { color: theme.tint }]}>Return to Albums</Text>
+          </Pressable>
         </View>
       ) : (
         <FlatList

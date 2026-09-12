@@ -14,6 +14,7 @@ import Animated, {
   withSpring,
   withTiming,
   runOnJS,
+  Easing,
 } from 'react-native-reanimated';
 import { TeddyReactionData } from '@/services/teddyReactionService';
 
@@ -26,7 +27,7 @@ export function TeddyReactionBanner() {
   // Animation values
   const translateY = useSharedValue(-80);
   const opacity = useSharedValue(0);
-  const scale = useSharedValue(0.9);
+  const scale = useSharedValue(0.92);
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [
@@ -41,13 +42,13 @@ export function TeddyReactionBanner() {
       clearTimeout(dismissTimerRef.current);
       dismissTimerRef.current = null;
     }
-    translateY.value = withTiming(-80, { duration: 220 });
+    translateY.value = withTiming(-80, { duration: 240, easing: Easing.in(Easing.ease) });
     opacity.value = withTiming(0, { duration: 200 }, (finished) => {
       if (finished) {
         runOnJS(setCurrentReaction)(null);
       }
     });
-    scale.value = withTiming(0.9, { duration: 200 });
+    scale.value = withTiming(0.92, { duration: 220 });
   }, []);
 
   useEffect(() => {
@@ -62,10 +63,10 @@ export function TeddyReactionBanner() {
 
         setCurrentReaction(reaction);
 
-        // Animate entrance
-        translateY.value = withSpring(0, { damping: 14, stiffness: 220 });
-        opacity.value = withTiming(1, { duration: 200 });
-        scale.value = withSpring(1, { damping: 12, stiffness: 200 });
+        // Animate entrance with smooth Apple-style spring
+        translateY.value = withSpring(0, { damping: 18, stiffness: 180, mass: 0.8 });
+        opacity.value = withTiming(1, { duration: 240 });
+        scale.value = withSpring(1, { damping: 16, stiffness: 180, mass: 0.8 });
 
         // Auto-dismiss
         dismissTimerRef.current = setTimeout(() => {

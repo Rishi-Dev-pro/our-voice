@@ -18,7 +18,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { vnRepository } from '@/database/repositories/vnRepository';
 import { vnService } from '@/services/vnService';
 import { VN } from '@/types/vn';
-import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
+import { useAudioState, useAudioActions, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
 import { MiniPlayer } from '@/components/mini-player';
 import { AddToAlbumModal } from '@/components/add-to-album-modal';
@@ -38,7 +38,8 @@ export default function ImportedScreen() {
   const [renameTargetVn, setRenameTargetVn] = useState<VN | null>(null);
   const [renameInput, setRenameInput] = useState('');
 
-  const { currentVn, isPlaying, playVn, updateCurrentVnMetadata } = useAudio();
+  const { currentVn, isPlaying } = useAudioState();
+  const { playVn, shuffleAll, updateCurrentVnMetadata } = useAudioActions();
   const router = useRouter();
   const theme = useTheme();
 
@@ -147,6 +148,7 @@ export default function ImportedScreen() {
       if (currentVn?.id === renameTargetVn.id) {
         updateCurrentVnMetadata({ title: trimmed });
       }
+      DeviceEventEmitter.emit('vn_metadata_updated', { id: renameTargetVn.id, updates: { title: trimmed } });
       DeviceEventEmitter.emit('library_updated');
       setRenameTargetVn(null);
     } catch {
@@ -204,8 +206,7 @@ export default function ImportedScreen() {
 
   function handleShufflePlay() {
     if (filteredVns.length > 0) {
-      const randomIndex = Math.floor(Math.random() * filteredVns.length);
-      playVn(filteredVns[randomIndex], 0, importedContext);
+      shuffleAll(filteredVns, importedContext);
     }
   }
 

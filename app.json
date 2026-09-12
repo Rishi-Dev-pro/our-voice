@@ -2,7 +2,7 @@
   "expo": {
     "name": "Our Voice",
     "slug": "Our-Voice",
-    "version": "1.0.0",
+    "version": "1.0.2",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "ourvoice",
@@ -12,7 +12,7 @@
     },
     "android": {
       "package": "com.rishi.ourvoice",
-      "versionCode": 1,
+      "versionCode": 3,
       "adaptiveIcon": {
         "backgroundColor": "#FFFBEB",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -20,13 +20,303 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "permissions": [
-        "RECORD_AUDIO",
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+        "android.permission.POST_NOTIFICATIONS"
       ],
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "content",
+              "mimeType": "application/vnd.ourvoice.ovp"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "application/x-ourvoice-package"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "application/ovp"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "application/vnd.ourvoice.ovp"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "application/x-ourvoice-package"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "application/ovp"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        },
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "application/octet-stream",
+              "pathPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "application/octet-stream",
+              "pathPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "application/octet-stream",
+              "pathSuffix": ".ovp"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "application/octet-stream",
+              "pathSuffix": ".OVP"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "application/octet-stream",
+              "sspPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "application/octet-stream",
+              "sspPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "application/octet-stream",
+              "sspSuffix": ".ovp"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "application/octet-stream",
+              "sspSuffix": ".OVP"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "application/zip",
+              "pathPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "application/zip",
+              "pathSuffix": ".ovp"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "application/zip",
+              "sspPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "application/zip",
+              "sspSuffix": ".ovp"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "*/*",
+              "pathPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "*/*",
+              "pathPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "*/*",
+              "pathSuffix": ".ovp"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "mimeType": "*/*",
+              "pathSuffix": ".OVP"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "*/*",
+              "sspPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "*/*",
+              "sspPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "*/*",
+              "sspSuffix": ".ovp"
+            },
+            {
+              "scheme": "content",
+              "mimeType": "*/*",
+              "sspSuffix": ".OVP"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        },
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "file",
+              "sspPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "file",
+              "sspPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "file",
+              "sspSuffix": ".ovp"
+            },
+            {
+              "scheme": "file",
+              "sspSuffix": ".OVP"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "*/*",
+              "sspPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "*/*",
+              "sspPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "*/*",
+              "sspSuffix": ".ovp"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "*/*",
+              "sspSuffix": ".OVP"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "application/octet-stream",
+              "sspPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "application/octet-stream",
+              "sspPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "application/octet-stream",
+              "sspSuffix": ".ovp"
+            },
+            {
+              "scheme": "file",
+              "mimeType": "application/octet-stream",
+              "sspSuffix": ".OVP"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        },
+        {
+          "action": "VIEW",
+          "data": [
+            {
+              "scheme": "content",
+              "host": "*",
+              "pathPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "pathPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "pathSuffix": ".ovp"
+            },
+            {
+              "scheme": "content",
+              "host": "*",
+              "pathSuffix": ".OVP"
+            },
+            {
+              "scheme": "content",
+              "sspPattern": ".*\\.ovp"
+            },
+            {
+              "scheme": "content",
+              "sspPattern": ".*\\.OVP"
+            },
+            {
+              "scheme": "content",
+              "sspSuffix": ".ovp"
+            },
+            {
+              "scheme": "content",
+              "sspSuffix": ".OVP"
+            }
+          ],
+          "category": [
+            "BROWSABLE",
+            "DEFAULT"
+          ]
+        },
+        {
+          "action": "SEND",
+          "data": [
+            {
+              "mimeType": "application/vnd.ourvoice.ovp"
+            },
+            {
+              "mimeType": "application/x-ourvoice-package"
+            },
+            {
+              "mimeType": "application/ovp"
+            },
+            {
+              "mimeType": "application/octet-stream"
+            },
+            {
+              "mimeType": "application/zip"
+            },
+            {
+              "mimeType": "*/*"
+            }
+          ],
+          "category": [
+            "DEFAULT"
+          ]
+        }
+      ]
     },
     "web": {
       "output": "static",
@@ -43,8 +333,14 @@
         }
       ],
       "expo-sqlite",
-      "expo-audio",
-      "expo-sharing"
+      [
+        "expo-audio",
+        {
+          "enableBackgroundPlayback": true
+        }
+      ],
+      "expo-sharing",
+      "./plugins/withOvpAssociation.js"
     ],
     "experiments": {
       "typedRoutes": true,

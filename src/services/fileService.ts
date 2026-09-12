@@ -171,10 +171,6 @@ export async function saveAudioFile(
     }
   }
 
-  // Development logging as requested
-  console.log('[VN IMPORT] destination URI:', destFile.uri);
-  console.log('[VN IMPORT] destination copySucceeded:', copySucceeded);
-
   if (!copySucceeded) {
     // Final check with legacy getInfoAsync
     const info = await FileSystemLegacy.getInfoAsync(destFile.uri);
@@ -209,13 +205,25 @@ export function deleteAudioFile(fileUri: string): void {
 
 /**
  * Checks if a local audio file exists on the filesystem.
+ * Returns true if and only if the physical file exists.
  */
 export function checkAudioFileExists(fileUri: string): boolean {
+  if (!fileUri || typeof fileUri !== 'string') return false;
   try {
     const file = new File(fileUri);
     if (file.exists) return true;
   } catch {}
-  return true; // Optimistic fallback if File constructor has platform issue
+
+  // Fallback check for decoded URI variation
+  try {
+    const decoded = decodeURI(fileUri);
+    if (decoded !== fileUri) {
+      const fileDecoded = new File(decoded);
+      if (fileDecoded.exists) return true;
+    }
+  } catch {}
+
+  return false;
 }
 
 /**

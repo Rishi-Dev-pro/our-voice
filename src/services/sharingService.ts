@@ -4,6 +4,8 @@ import { checkAudioFileExists } from './fileService';
 
 import * as ExpoSharing from 'expo-sharing';
 
+export const OVP_MIME_TYPE = 'application/vnd.ourvoice.ovp';
+
 export const sharingService = {
   /**
    * Opens the Android share sheet to export/share a physical voice note audio file.
@@ -63,16 +65,38 @@ export const sharingService = {
   /**
    * Shares an arbitrary file (such as an .ovp package) via Android share sheet.
    */
-  async shareFile(fileUri: string, dialogTitle: string, mimeType = 'application/octet-stream'): Promise<boolean> {
+  async shareFile(fileUri: string, dialogTitle: string, mimeType?: string): Promise<boolean> {
+    const resolvedMimeType =
+      mimeType ||
+      (fileUri.toLowerCase().includes('.ovp') ? OVP_MIME_TYPE : 'application/octet-stream');
+
     try {
       if (ExpoSharing && typeof ExpoSharing.isAvailableAsync === 'function') {
         const isAvailable = await ExpoSharing.isAvailableAsync();
         if (isAvailable) {
-          await ExpoSharing.shareAsync(fileUri, {
-            mimeType,
-            dialogTitle,
-          });
-          return true;
+          const urisToTry = [fileUri];
+          const decoded = fileUri.replace(/%2540/gi, '@').replace(/%252F/gi, '/');
+          if (decoded !== fileUri && !urisToTry.includes(decoded)) {
+            urisToTry.push(decoded);
+          }
+
+          let shareSuccess = false;
+          let lastShareErr: any = null;
+          for (const u of urisToTry) {
+            try {
+              await ExpoSharing.shareAsync(u, {
+                mimeType: resolvedMimeType,
+                dialogTitle,
+              });
+              shareSuccess = true;
+              break;
+            } catch (err) {
+              lastShareErr = err;
+            }
+          }
+
+          if (shareSuccess) return true;
+          console.warn('[SHARING SERVICE] ExpoSharing failed with candidate URIs:', lastShareErr);
         }
       }
 

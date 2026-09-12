@@ -1,7 +1,15 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withTiming,
+  runOnJS,
+} from 'react-native-reanimated';
+
 import { useAudio } from '@/services/audioPlayerContext';
 import { formatDuration } from '@/utils/format';
 import { useTheme } from '@/hooks/use-theme';
@@ -19,6 +27,31 @@ export function MiniPlayer() {
   const router = useRouter();
   const theme = useTheme();
 
+  const translateY = useSharedValue(50);
+  const opacity = useSharedValue(0);
+
+  useEffect(() => {
+    if (currentVn) {
+      translateY.value = withSpring(0, { damping: 18, stiffness: 200, mass: 0.8 });
+      opacity.value = withTiming(1, { duration: 220 });
+    }
+  }, [currentVn, translateY, opacity]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: translateY.value }],
+    opacity: opacity.value,
+  }));
+
+  const handleDismiss = (e: any) => {
+    e.stopPropagation();
+    translateY.value = withTiming(50, { duration: 180 });
+    opacity.value = withTiming(0, { duration: 160 }, (finished) => {
+      if (finished) {
+        runOnJS(stop)();
+      }
+    });
+  };
+
   if (!currentVn) {
     return null;
   }
@@ -28,7 +61,7 @@ export function MiniPlayer() {
     activeDuration > 0 ? Math.min(100, (currentTime / activeDuration) * 100) : 0;
 
   return (
-    <View style={styles.outerWrapper}>
+    <Animated.View style={[styles.outerWrapper, animatedStyle]}>
       <Pressable
         style={({ pressed }) => [
           styles.container,
@@ -82,10 +115,7 @@ export function MiniPlayer() {
               pressed && { opacity: 0.6 },
             ]}
             hitSlop={8}
-            onPress={(e) => {
-              e.stopPropagation();
-              stop();
-            }}>
+            onPress={handleDismiss}>
             <Ionicons name="close" size={20} color={theme.textSecondary} />
           </Pressable>
         </View>
@@ -100,7 +130,7 @@ export function MiniPlayer() {
           />
         </View>
       </Pressable>
-    </View>
+    </Animated.View>
   );
 }
 

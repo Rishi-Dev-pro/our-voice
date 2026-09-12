@@ -17,7 +17,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { recentlyPlayedRepository } from '@/database/repositories/recentlyPlayedRepository';
 import { vnRepository } from '@/database/repositories/vnRepository';
 import { VN } from '@/types/vn';
-import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
+import { useAudioState, useAudioActions, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
 import { MiniPlayer } from '@/components/mini-player';
 import { AddToAlbumModal } from '@/components/add-to-album-modal';
@@ -31,7 +31,8 @@ export default function RecentlyPlayedScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [albumModalVn, setAlbumModalVn] = useState<VN | null>(null);
 
-  const { currentVn, isPlaying, playVn, shuffleAll, addAlbumToQueue, updateCurrentVnMetadata } = useAudio();
+  const { currentVn, isPlaying } = useAudioState();
+  const { playVn, shuffleAll, addAlbumToQueue, updateCurrentVnMetadata } = useAudioActions();
   const router = useRouter();
   const theme = useTheme();
 

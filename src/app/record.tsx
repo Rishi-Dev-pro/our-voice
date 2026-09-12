@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -27,7 +27,7 @@ import Animated, {
 import { RecordingPresets, useAudioRecorder, useAudioRecorderState } from 'expo-audio';
 
 import { useTheme } from '@/hooks/use-theme';
-import { useAudio } from '@/services/audioPlayerContext';
+import { useAudioActions } from '@/services/audioPlayerContext';
 import { recordService } from '@/services/recordService';
 import { deleteAudioFile } from '@/services/fileService';
 import { sharingService } from '@/services/sharingService';
@@ -36,13 +36,13 @@ import { LiveWaveform } from '@/components/live-waveform';
 import { VN } from '@/types/vn';
 import { teddyReactionService } from '@/services/teddyReactionService';
 
-type RecordStage = 'idle' | 'recording' | 'paused' | 'stopped' | 'saved';
+type RecordStage = 'idle' | 'recording' | 'paused' | 'stopped' | 'saving' | 'saved';
 
 export default function RecordScreen() {
   const router = useRouter();
   const { takeBaseTitle } = useLocalSearchParams<{ takeBaseTitle?: string }>();
   const theme = useTheme();
-  const { stop: stopPlayback } = useAudio();
+  const { stop: stopPlayback } = useAudioActions();
 
   const [stage, setStage] = useState<RecordStage>('idle');
   const stageRef = useRef<RecordStage>('idle');
@@ -57,9 +57,13 @@ export default function RecordScreen() {
   const [permissionGranted, setPermissionGranted] = useState<boolean | null>(null);
   const [checkingPermission, setCheckingPermission] = useState(true);
   const [finalUri, setFinalUri] = useState<string | null>(null);
+  const finalUriRef = useRef<string | null>(null);
+  finalUriRef.current = finalUri;
+  const isSavingRef = useRef(false);
   const [finalDuration, setFinalDuration] = useState(0);
   const [titleInput, setTitleInput] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  isSavingRef.current = isSaving;
   const [savedVn, setSavedVn] = useState<VN | null>(null);
 
   // Audio Recorder Hook with metering enabled for live waveform
@@ -97,13 +101,15 @@ export default function RecordScreen() {
     return () => {
       clearTimer();
       teddyReactionService.setRecordingActive(false);
-      // Safely cleanup active recording session on sudden unmount
+      // Safely cleanup active or abandoned recording session on sudden unmount
       try {
         if (stageRef.current === 'recording' || stageRef.current === 'paused') {
           recorder.stop().catch(() => {});
           if (recorder.uri) {
             deleteAudioFile(recorder.uri);
           }
+        } else if (stageRef.current === 'stopped' && finalUriRef.current) {
+          deleteAudioFile(finalUriRef.current);
         }
       } catch {}
       recordService.restoreAudioAfterRecording();
@@ -289,8 +295,9 @@ export default function RecordScreen() {
   }
 
   async function handleSaveRecording() {
-    if (!finalUri) return;
+    if (!finalUri || isSavingRef.current) return;
     setIsSaving(true);
+    setStage('saving');
     try {
       const saved = await recordService.saveRecording(finalUri, finalDuration, titleInput);
       setSavedVn(saved);
@@ -299,6 +306,7 @@ export default function RecordScreen() {
     } catch (err: any) {
       console.error('[RECORD] Save recording failed:', err);
       Alert.alert('Save Failed', err?.message || 'Could not save voice note to permanent storage.');
+      setStage('stopped');
     } finally {
       setIsSaving(false);
     }
@@ -392,9 +400,17 @@ export default function RecordScreen() {
   }
 
   function handleBack() {
+    if (isSaving || stage === 'saving') {
+      // Do not allow exiting or deleting while save is actively in flight
+      return;
+    }
     if (stage === 'recording' || stage === 'paused') {
       confirmExitOptions();
     } else {
+      if (stage === 'stopped' && finalUri) {
+        deleteAudioFile(finalUri);
+        setFinalUri(null);
+      }
       router.back();
     }
   }
@@ -504,7 +520,7 @@ export default function RecordScreen() {
           {/* Real-time Visual Waveform */}
           <View style={styles.waveformWrapper}>
             <LiveWaveform
-              stage={stage === 'saved' ? 'stopped' : stage}
+              stage={stage === 'saved' || stage === 'saving' ? 'stopped' : stage}
               metering={recorderState.metering}
               height={64}
             />

@@ -156,8 +156,6 @@ export const recordService = {
       throw dbErr;
     }
 
-    console.log('[RECORD SERVICE] Saved recording to library:', vn.title, vn.fileUri);
-
     // 3. Notify app components
     DeviceEventEmitter.emit('library_updated');
 

@@ -8,7 +8,7 @@ import { useTheme } from '@/hooks/use-theme';
 import { AppleArtwork } from './apple-artwork';
 import { AppleActionSheet } from './apple-action-sheet';
 
-import { useAudio } from '@/services/audioPlayerContext';
+import { useAudioActions } from '@/services/audioPlayerContext';
 import { teddyReactionService } from '@/services/teddyReactionService';
 
 interface VnItemProps {
@@ -29,7 +29,7 @@ interface VnItemProps {
   onTakeAgain?: (vn: VN) => void;
 }
 
-export function VnItem({
+export const VnItem = React.memo(function VnItem({
   vn,
   isPlaying = false,
   trackNumber,
@@ -47,7 +47,7 @@ export function VnItem({
   onTakeAgain,
 }: VnItemProps) {
   const theme = useTheme();
-  const { playNext: ctxPlayNext, addToQueue: ctxAddToQueue } = useAudio();
+  const { playNext: ctxPlayNext, addToQueue: ctxAddToQueue } = useAudioActions();
   const [sheetVisible, setSheetVisible] = useState(false);
 
   // Animated heart pop on like toggle
@@ -56,11 +56,11 @@ export function VnItem({
   useEffect(() => {
     if (vn.isLiked) {
       heartScale.value = withSequence(
-        withSpring(1.35, { damping: 4, stiffness: 300 }),
-        withSpring(1.0, { damping: 8, stiffness: 200 })
+        withSpring(1.3, { damping: 8, stiffness: 220, mass: 0.8 }),
+        withSpring(1.0, { damping: 10, stiffness: 180 })
       );
     }
-  }, [vn.isLiked]);
+  }, [vn.isLiked, heartScale]);
 
   const animatedHeartStyle = useAnimatedStyle(() => ({
     transform: [{ scale: heartScale.value }],
@@ -76,8 +76,8 @@ export function VnItem({
 
   function handleHeartPress() {
     heartScale.value = withSequence(
-      withSpring(1.4, { damping: 4, stiffness: 300 }),
-      withSpring(1.0, { damping: 8, stiffness: 200 })
+      withSpring(1.3, { damping: 8, stiffness: 220, mass: 0.8 }),
+      withSpring(1.0, { damping: 10, stiffness: 180 })
     );
     onToggleLike(vn);
   }
@@ -263,7 +263,7 @@ export function VnItem({
       />
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   outerContainer: {

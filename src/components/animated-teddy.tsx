@@ -45,21 +45,21 @@ export function AnimatedTeddy({ size = 76, isPlaying = false }: AnimatedTeddyPro
     );
   }, []);
 
-  // When audio is playing, add a sweet active pulse
+  // When audio is playing, add a sweet rhythmic active pulse
   useEffect(() => {
     if (isPlaying) {
       tapScale.value = withRepeat(
         withSequence(
-          withTiming(1.05, { duration: 400 }),
-          withTiming(1.0, { duration: 400 })
+          withTiming(1.04, { duration: 650, easing: Easing.inOut(Easing.sin) }),
+          withTiming(1.0, { duration: 650, easing: Easing.inOut(Easing.sin) })
         ),
         -1,
         true
       );
     } else {
-      tapScale.value = withSpring(1);
+      tapScale.value = withSpring(1, { damping: 14, stiffness: 140 });
     }
-  }, [isPlaying]);
+  }, [isPlaying, tapScale]);
 
   const animatedHeadStyle = useAnimatedStyle(() => ({
     transform: [
@@ -71,8 +71,8 @@ export function AnimatedTeddy({ size = 76, isPlaying = false }: AnimatedTeddyPro
 
   function handleTeddyPress() {
     tapScale.value = withSequence(
-      withSpring(1.15, { damping: 6, stiffness: 200 }),
-      withSpring(1.0, { damping: 8, stiffness: 150 })
+      withSpring(1.12, { damping: 10, stiffness: 220, mass: 0.8 }),
+      withSpring(1.0, { damping: 12, stiffness: 160 })
     );
   }
 

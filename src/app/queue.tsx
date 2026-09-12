@@ -11,28 +11,48 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import Ionicons from '@expo/vector-icons/Ionicons';
 
-import { useAudio } from '@/services/audioPlayerContext';
+import { useAudioState, useAudioActions, useAudioProgress } from '@/services/audioPlayerContext';
 import { formatDuration } from '@/utils/format';
 import { useTheme } from '@/hooks/use-theme';
 import { AppleArtwork } from '@/components/apple-artwork';
 import { VN } from '@/types/vn';
 
+function NowPlayingProgressLabel({
+  duration: fallbackDuration,
+  isPlaying,
+  color,
+}: {
+  duration: number;
+  isPlaying: boolean;
+  color: string;
+}) {
+  const { currentTime, duration: liveDuration } = useAudioProgress();
+  const displayDuration = liveDuration > 0 ? liveDuration : fallbackDuration || 0;
+  return (
+    <Text style={[styles.cardMeta, { color }]} numberOfLines={1}>
+      {isPlaying ? 'Playing • ' : 'Paused • '}
+      {formatDuration(currentTime)} / {formatDuration(displayDuration)}
+    </Text>
+  );
+}
+
 export default function QueueScreen() {
   const {
     currentVn,
     isPlaying,
-    currentTime,
-    duration,
     manualQueue,
     playbackContext,
     repeatMode,
     isShuffle,
     shuffledOrder,
+  } = useAudioState();
+
+  const {
     removeFromQueue,
     clearQueue,
     moveQueueItem,
     playVn,
-  } = useAudio();
+  } = useAudioActions();
 
   const router = useRouter();
   const theme = useTheme();
@@ -82,7 +102,7 @@ export default function QueueScreen() {
     return afterCurrent;
   }, [playbackContext, currentVn?.id, repeatMode, isShuffle, shuffledOrder]);
 
-  const activeDuration = duration || currentVn?.duration || 0;
+  const activeDuration = currentVn?.duration || 0;
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.background }]}>
@@ -143,10 +163,11 @@ export default function QueueScreen() {
                     <Text style={[styles.cardTitle, { color: '#D97706' }]} numberOfLines={1}>
                       {currentVn.title}
                     </Text>
-                    <Text style={[styles.cardMeta, { color: theme.textSecondary }]}>
-                      {isPlaying ? 'Playing • ' : 'Paused • '}
-                      {formatDuration(currentTime)} / {formatDuration(activeDuration)}
-                    </Text>
+                    <NowPlayingProgressLabel
+                      duration={activeDuration}
+                      isPlaying={isPlaying}
+                      color={theme.textSecondary}
+                    />
                   </View>
                   <View style={[styles.playingBadge, { backgroundColor: '#D97706' }]}>
                     <Ionicons

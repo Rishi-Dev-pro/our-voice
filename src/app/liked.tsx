@@ -16,7 +16,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 
 import { vnRepository } from '@/database/repositories/vnRepository';
 import { VN } from '@/types/vn';
-import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
+import { useAudioState, useAudioActions, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
 import { MiniPlayer } from '@/components/mini-player';
 import { AddToAlbumModal } from '@/components/add-to-album-modal';
@@ -30,7 +30,8 @@ export default function LikedScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [albumModalVn, setAlbumModalVn] = useState<VN | null>(null);
 
-  const { currentVn, isPlaying, playVn, updateCurrentVnMetadata } = useAudio();
+  const { currentVn, isPlaying } = useAudioState();
+  const { playVn, shuffleAll, updateCurrentVnMetadata } = useAudioActions();
   const router = useRouter();
   const theme = useTheme();
 
@@ -120,8 +121,7 @@ export default function LikedScreen() {
 
   function handleShufflePlay() {
     if (filteredVns.length > 0) {
-      const randomIndex = Math.floor(Math.random() * filteredVns.length);
-      playVn(filteredVns[randomIndex], 0, likedContext);
+      shuffleAll(filteredVns, likedContext);
     }
   }
 
