@@ -366,7 +366,7 @@ export function TeddyOnboarding({ onComplete }: TeddyOnboardingProps) {
                     exiting={FadeOut}
                     style={[styles.allSetBox, { backgroundColor: teddy.cardAlt }]}>
                     <Text style={[styles.allSetText, { color: teddy.text }]}>
-                      You're all set! 🧸❤️
+                      {"You're all set! 🧸❤️"}
                     </Text>
                   </Animated.View>
                 )}

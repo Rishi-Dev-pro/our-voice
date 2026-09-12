@@ -8,11 +8,16 @@ import { useTheme } from '@/hooks/use-theme';
 import { AppleArtwork } from './apple-artwork';
 import { AppleActionSheet } from './apple-action-sheet';
 
+import { useAudio } from '@/services/audioPlayerContext';
+import { teddyReactionService } from '@/services/teddyReactionService';
+
 interface VnItemProps {
   vn: VN;
   isPlaying?: boolean;
   trackNumber?: number;
   onPlay: (vn: VN) => void;
+  onPlayNext?: (vn: VN) => void;
+  onAddToQueue?: (vn: VN) => void;
   onToggleLike: (vn: VN) => void;
   onTogglePin?: (vn: VN) => void;
   onDelete?: (vn: VN) => void;
@@ -29,6 +34,8 @@ export function VnItem({
   isPlaying = false,
   trackNumber,
   onPlay,
+  onPlayNext,
+  onAddToQueue,
   onToggleLike,
   onTogglePin,
   onDelete,
@@ -40,6 +47,7 @@ export function VnItem({
   onTakeAgain,
 }: VnItemProps) {
   const theme = useTheme();
+  const { playNext: ctxPlayNext, addToQueue: ctxAddToQueue } = useAudio();
   const [sheetVisible, setSheetVisible] = useState(false);
 
   // Animated heart pop on like toggle
@@ -229,6 +237,22 @@ export function VnItem({
         isPlaying={isPlaying}
         onClose={() => setSheetVisible(false)}
         onPlay={onPlay}
+        onPlayNext={(v) => {
+          if (onPlayNext) {
+            onPlayNext(v);
+          } else {
+            const res = ctxPlayNext(v);
+            teddyReactionService.trigger('CUSTOM', res.message);
+          }
+        }}
+        onAddToQueue={(v) => {
+          if (onAddToQueue) {
+            onAddToQueue(v);
+          } else {
+            const res = ctxAddToQueue(v);
+            teddyReactionService.trigger('CUSTOM', res.message);
+          }
+        }}
         onToggleLike={onToggleLike}
         onTogglePin={onTogglePin}
         onAddToAlbum={onAddToAlbum}

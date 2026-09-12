@@ -28,7 +28,7 @@ import { vnRepository } from '@/database/repositories/vnRepository';
 import { albumRepository } from '@/database/repositories/albumRepository';
 import { vnService } from '@/services/vnService';
 import { VN } from '@/types/vn';
-import { useAudio } from '@/services/audioPlayerContext';
+import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
 import { MiniPlayer } from '@/components/mini-player';
 import { AddToAlbumModal } from '@/components/add-to-album-modal';
@@ -67,13 +67,14 @@ export default function LibraryScreen() {
 
   // Shake & interaction guards
   const isPlayingRef = useRef(false);
-  isPlayingRef.current = isPlaying;
-
   const isTypingRef = useRef(false);
-  isTypingRef.current = searchQuery.length > 0;
-
   const isModalOpenRef = useRef(false);
-  isModalOpenRef.current = albumModalVn !== null || renameTargetVn !== null;
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+    isTypingRef.current = searchQuery.length > 0;
+    isModalOpenRef.current = albumModalVn !== null || renameTargetVn !== null;
+  }, [isPlaying, searchQuery, albumModalVn, renameTargetVn]);
 
   const lastShakeTimeRef = useRef(0);
   const isSurprisingRef = useRef(false);
@@ -242,6 +243,41 @@ export default function LibraryScreen() {
     const q = searchQuery.toLowerCase();
     return list.filter((v) => v.title.toLowerCase().includes(q));
   }, [vns, selectedTab, searchQuery]);
+
+  const handlePlayPinnedTrack = (track: VN) => {
+    const ctx: PlaybackContext = {
+      type: 'pinned',
+      title: 'Pinned Keepsakes',
+      items: pinnedVns,
+    };
+    playVn(track, 0, ctx);
+  };
+
+  const handlePlayAllPinned = () => {
+    if (pinnedVns.length > 0) {
+      handlePlayPinnedTrack(pinnedVns[0]);
+    }
+  };
+
+  const handlePlayMainTrack = (track: VN) => {
+    const ctx: PlaybackContext = {
+      type: 'all',
+      title:
+        selectedTab === 'recorded'
+          ? 'Recorded Keepsakes'
+          : selectedTab === 'imported'
+          ? 'Imported Songs'
+          : 'All Voice Notes',
+      items: filteredVns,
+    };
+    playVn(track, 0, ctx);
+  };
+
+  const handlePlayAllMain = () => {
+    if (filteredVns.length > 0) {
+      handlePlayMainTrack(filteredVns[0]);
+    }
+  };
 
   async function handleTogglePin(vn: VN) {
     const nextState = !vn.isPinned;
@@ -487,7 +523,7 @@ export default function LibraryScreen() {
                       {userName ? `Welcome back, ${userName}! 🧸` : 'Welcome back! 🧸'}
                     </Text>
                     <Text style={[styles.heroSubtitle, { color: teddy.textSecondary }]} numberOfLines={2}>
-                      Here you can also sing and store other's VNs.
+                      {"Here you can also sing and store other's VNs."}
                     </Text>
                     <View style={styles.safeRow}>
                       <Ionicons name="shield-checkmark" size={13} color="#2E7D32" />
@@ -704,6 +740,13 @@ export default function LibraryScreen() {
                           Pinned Keepsakes ({pinnedVns.length})
                         </Text>
                       </View>
+                      <Pressable
+                        style={styles.playAllPill}
+                        hitSlop={8}
+                        onPress={handlePlayAllPinned}>
+                        <Ionicons name="play" size={12} color="#D97706" />
+                        <Text style={[styles.playAllPillText, { color: '#D97706' }]}>Play All</Text>
+                      </Pressable>
                     </View>
 
                     <View style={styles.pinnedCardsList}>
@@ -712,13 +755,16 @@ export default function LibraryScreen() {
                           key={`pinned-${pinnedVn.id}`}
                           vn={pinnedVn}
                           isPlaying={currentVn?.id === pinnedVn.id && isPlaying}
-                          onPlay={playVn}
+                          onPlay={handlePlayPinnedTrack}
                           onToggleLike={handleToggleLike}
                           onTogglePin={handleTogglePin}
                           onDelete={handleDeleteVn}
                           onRename={handleOpenRename}
                           onAddToAlbum={(v) => setAlbumModalVn(v)}
-                          onPress={(v) => router.push(`/player/${v.id}` as any)}
+                          onPress={(v) => {
+                            handlePlayPinnedTrack(v);
+                            router.push(`/player/${v.id}` as any);
+                          }}
                         />
                       ))}
                     </View>
@@ -773,8 +819,8 @@ export default function LibraryScreen() {
                   </Pressable>
                 </View>
 
-                {/* Section Header */}
-                <View style={styles.sectionHeader}>
+                {/* Section Header with Play All */}
+                <View style={[styles.sectionHeader, { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }]}>
                   <Text style={[styles.sectionTitle, { color: teddy.textSecondary }]}>
                     {selectedTab === 'all'
                       ? '🍯 ALL VOICE KEEPSAKES'
@@ -782,6 +828,15 @@ export default function LibraryScreen() {
                       ? '🎙️ RECORDED IN OUR VOICE'
                       : '🎵 IMPORTED FROM DEVICE'}
                   </Text>
+                  {filteredVns.length > 0 && (
+                    <Pressable
+                      style={styles.playAllPill}
+                      hitSlop={8}
+                      onPress={handlePlayAllMain}>
+                      <Ionicons name="play" size={12} color={teddy.primary} />
+                      <Text style={[styles.playAllPillText, { color: teddy.primary }]}>Play All</Text>
+                    </Pressable>
+                  )}
                 </View>
               </View>
             ) : (
@@ -836,13 +891,16 @@ export default function LibraryScreen() {
             <VnItem
               vn={item}
               isPlaying={currentVn?.id === item.id && isPlaying}
-              onPlay={playVn}
+              onPlay={handlePlayMainTrack}
               onToggleLike={handleToggleLike}
               onTogglePin={handleTogglePin}
               onDelete={handleDeleteVn}
               onRename={handleOpenRename}
               onAddToAlbum={(vn) => setAlbumModalVn(vn)}
-              onPress={(vn) => router.push(`/player/${vn.id}` as any)}
+              onPress={(vn) => {
+                handlePlayMainTrack(vn);
+                router.push(`/player/${vn.id}` as any);
+              }}
             />
           )}
         />
@@ -1329,6 +1387,19 @@ const styles = StyleSheet.create({
   },
   renameBtnText: {
     fontSize: 14,
+    fontWeight: '700',
+  },
+  playAllPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(217, 119, 6, 0.1)',
+  },
+  playAllPillText: {
+    fontSize: 12,
     fontWeight: '700',
   },
 });

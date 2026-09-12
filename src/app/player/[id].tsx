@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   DeviceEventEmitter,
   GestureResponderEvent,
   Modal,
+  PanResponder,
   Pressable,
   StyleSheet,
   Text,
@@ -21,7 +22,6 @@ import { vnRepository } from '@/database/repositories/vnRepository';
 import { VN } from '@/types/vn';
 import {
   useAudio,
-  PlaybackSpeed,
   SUPPORTED_SPEEDS,
   SleepTimerOption,
 } from '@/services/audioPlayerContext';
@@ -42,8 +42,33 @@ export default function PlayerScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const vnId = Array.isArray(id) ? id[0] : id;
 
-  const [vn, setVn] = useState<VN | null>(null);
-  const [loading, setLoading] = useState(true);
+  const {
+    currentVn,
+    isPlaying,
+    currentTime,
+    duration,
+    repeatMode,
+    playbackRate,
+    sleepTimerType,
+    sleepTimerRemaining,
+    manualQueue,
+    playVn,
+    togglePlayPause,
+    cycleRepeatMode,
+    playNextTrack,
+    playPreviousTrack,
+    addToQueue,
+    playNext,
+    setPlaybackRate,
+    setSleepTimer,
+    seekTo,
+    updateCurrentVnMetadata,
+  } = useAudio();
+
+  const [loadedVn, setLoadedVn] = useState<VN | null>(null);
+  const vn = currentVn || loadedVn;
+  const setVn = setLoadedVn;
+  const [loading, setLoading] = useState(!currentVn || currentVn.id !== vnId);
   const [progressBarWidth, setProgressBarWidth] = useState(0);
 
   // Real-time scrubbing state & layout refs
@@ -67,24 +92,6 @@ export default function PlayerScreen() {
 
   // Simulated Volume
   const [volumeLevel, setVolumeLevel] = useState(0.85);
-
-  const {
-    currentVn,
-    isPlaying,
-    currentTime,
-    duration,
-    isLooping,
-    playbackRate,
-    sleepTimerType,
-    sleepTimerRemaining,
-    playVn,
-    togglePlayPause,
-    toggleLoop,
-    setPlaybackRate,
-    setSleepTimer,
-    seekTo,
-    updateCurrentVnMetadata,
-  } = useAudio();
 
   const router = useRouter();
   const theme = useTheme();
@@ -117,33 +124,74 @@ export default function PlayerScreen() {
     };
   });
 
-  const loadVn = useCallback(async () => {
-    if (!vnId) return;
-    try {
-      const data = await vnRepository.getVnById(vnId);
-      setVn(data);
-    } catch (err) {
-      console.warn('Error loading VN:', err);
-    } finally {
-      setLoading(false);
+  const hasAutoPlayedRef = useRef(false);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    // If audio player already has this track active, no DB fetch needed
+    if (currentVn && currentVn.id === vnId) {
+      return;
     }
-  }, [vnId]);
+
+    async function loadInitial() {
+      if (!vnId) return;
+      try {
+        const data = await vnRepository.getVnById(vnId);
+        if (!isMounted) return;
+        setLoadedVn(data);
+        setLoading(false);
+        if (data && !hasAutoPlayedRef.current) {
+          hasAutoPlayedRef.current = true;
+          playVn(data);
+        }
+      } catch (err) {
+        console.warn('Error loading initial VN in PlayerScreen:', err);
+        if (isMounted) setLoading(false);
+      }
+    }
+
+    loadInitial();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [vnId, currentVn]);
 
   useEffect(() => {
-    loadVn();
-  }, [loadVn]);
-
-  useEffect(() => {
-    const sub = DeviceEventEmitter.addListener('library_updated', loadVn);
+    const sub = DeviceEventEmitter.addListener('library_updated', async () => {
+      const activeId = currentVn?.id || vnId;
+      if (activeId) {
+        try {
+          const data = await vnRepository.getVnById(activeId);
+          if (data) setLoadedVn(data);
+        } catch {}
+      }
+    });
     return () => sub.remove();
-  }, [loadVn]);
+  }, [vnId, currentVn?.id]);
 
-  // If this VN isn't currently loaded into the player, auto-play on open
-  useEffect(() => {
-    if (vn && currentVn?.id !== vn.id) {
-      playVn(vn);
-    }
-  }, [vn?.id, currentVn?.id]);
+  // Horizontal Swipe Gestures for Previous / Next track
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_, gestureState) => {
+          return (
+            Math.abs(gestureState.dx) > 30 &&
+            Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5
+          );
+        },
+        onPanResponderRelease: (_, gestureState) => {
+          if (gestureState.dx < -50) {
+            playNextTrack(true);
+          } else if (gestureState.dx > 50) {
+            playPreviousTrack(true);
+          }
+        },
+      }),
+    [playNextTrack, playPreviousTrack]
+  );
 
   const activeDuration = duration || vn?.duration || 0;
   const displayTime = isScrubbing ? scrubPosition : currentTime;
@@ -224,7 +272,7 @@ export default function PlayerScreen() {
       await vnRepository.toggleLike(vn.id, nextState);
       DeviceEventEmitter.emit('library_updated');
       teddyReactionService.trigger(nextState ? 'LIKE' : 'UNLIKE');
-    } catch (err) {
+    } catch {
       setVn((prev) => (prev ? { ...prev, isLiked: !nextState } : null));
       if (currentVn?.id === vn.id) {
         updateCurrentVnMetadata({ isLiked: !nextState });
@@ -243,7 +291,7 @@ export default function PlayerScreen() {
       await vnRepository.togglePin(vn.id, nextState);
       DeviceEventEmitter.emit('library_updated');
       teddyReactionService.trigger(nextState ? 'PIN' : 'UNPIN');
-    } catch (err) {
+    } catch {
       setVn((prev) => (prev ? { ...prev, isPinned: !nextState } : null));
       if (currentVn?.id === vn.id) {
         updateCurrentVnMetadata({ isPinned: !nextState });
@@ -361,8 +409,8 @@ export default function PlayerScreen() {
       </View>
 
       <View style={styles.contentContainer}>
-        {/* Animated Artwork Centerpiece with Apple Music Spring Scaling */}
-        <View style={styles.artworkContainer}>
+        {/* Animated Artwork Centerpiece with Apple Music Spring Scaling & Swipe Gestures */}
+        <View style={styles.artworkContainer} {...panResponder.panHandlers}>
           <Animated.View style={[animatedArtworkStyle, styles.artworkShadow]}>
             <AppleArtwork
               id={vn.id}
@@ -486,6 +534,17 @@ export default function PlayerScreen() {
 
         {/* Apple Music Main Playback Deck */}
         <View style={styles.controlsRow}>
+          {/* Previous Track */}
+          <Pressable
+            style={({ pressed }) => [
+              styles.skipBtn,
+              pressed && { opacity: 0.6 },
+            ]}
+            hitSlop={10}
+            onPress={() => playPreviousTrack()}>
+            <Ionicons name="play-skip-back" size={28} color={theme.text} />
+          </Pressable>
+
           {/* Skip -10s */}
           <Pressable
             style={({ pressed }) => [
@@ -494,7 +553,7 @@ export default function PlayerScreen() {
             ]}
             hitSlop={10}
             onPress={handleSeekBackward}>
-            <Ionicons name="play-back" size={32} color={theme.text} />
+            <Ionicons name="play-back" size={26} color={theme.textSecondary} />
           </Pressable>
 
           {/* Large Center Play / Pause Button */}
@@ -521,7 +580,18 @@ export default function PlayerScreen() {
             ]}
             hitSlop={10}
             onPress={handleSeekForward}>
-            <Ionicons name="play-forward" size={32} color={theme.text} />
+            <Ionicons name="play-forward" size={26} color={theme.textSecondary} />
+          </Pressable>
+
+          {/* Next Track */}
+          <Pressable
+            style={({ pressed }) => [
+              styles.skipBtn,
+              pressed && { opacity: 0.6 },
+            ]}
+            hitSlop={10}
+            onPress={() => playNextTrack()}>
+            <Ionicons name="play-skip-forward" size={28} color={theme.text} />
           </Pressable>
         </View>
 
@@ -565,26 +635,45 @@ export default function PlayerScreen() {
           </Pressable>
         </View>
 
-        {/* Bottom Auxiliary Bar: Loop, Speed, Sleep Timer, Playlist */}
+        {/* Bottom Auxiliary Bar: Repeat, Speed, Sleep Timer, Add to Album, Up Next */}
         <View style={styles.auxiliaryBar}>
-          {/* Loop Button */}
+          {/* Repeat Button */}
           <Pressable
             style={({ pressed }) => [
               styles.auxBtn,
               pressed && { opacity: 0.7 },
             ]}
             onPress={() => {
-              const willLoop = !isLooping;
-              toggleLoop();
-              if (willLoop) {
+              cycleRepeatMode();
+              const next =
+                repeatMode === 'off' ? 'ALL' : repeatMode === 'all' ? 'ONE' : 'OFF';
+              if (next === 'ONE') {
                 teddyReactionService.trigger('LOOP_ON');
+              } else {
+                teddyReactionService.trigger('CUSTOM', `Repeat: ${next} 🔁`);
               }
             }}>
-            <Ionicons
-              name="repeat"
-              size={22}
-              color={isLooping ? theme.tint : theme.textSecondary}
-            />
+            <View style={{ position: 'relative', alignItems: 'center', justifyContent: 'center' }}>
+              <Ionicons
+                name={repeatMode === 'off' ? 'repeat-outline' : 'repeat'}
+                size={23}
+                color={repeatMode === 'off' ? theme.textSecondary : theme.tint}
+              />
+              {repeatMode === 'one' && (
+                <View
+                  style={{
+                    position: 'absolute',
+                    top: -4,
+                    right: -6,
+                    backgroundColor: theme.tint,
+                    borderRadius: 6,
+                    paddingHorizontal: 3,
+                    paddingVertical: 1,
+                  }}>
+                  <Text style={{ color: '#FFFFFF', fontSize: 9, fontWeight: '800' }}>1</Text>
+                </View>
+              )}
+            </View>
           </Pressable>
 
           {/* Speed Button */}
@@ -627,28 +716,47 @@ export default function PlayerScreen() {
             </View>
           </Pressable>
 
-          {/* AirPlay / Route Output Indicator */}
+          {/* Add to Album */}
+          <Pressable
+            style={styles.auxBtn}
+            hitSlop={8}
+            onPress={() => setAlbumModalVisible(true)}>
+            <Ionicons name="folder-open-outline" size={21} color={theme.textSecondary} />
+          </Pressable>
+
+          {/* Up Next / Queue Button */}
           <Pressable
             style={({ pressed }) => [
               styles.auxBtn,
               pressed && { opacity: 0.7 },
             ]}
-            onPress={() => {
-              // Informative toast/alert that local device output is active
-              Alert.alert(
-                'Audio Output',
-                'Playing via local device speaker / headphones 🎧',
-                [{ text: 'OK' }]
-              );
-            }}>
-            <Ionicons name="radio-outline" size={20} color={theme.textSecondary} />
-          </Pressable>
-
-          {/* Add to Album / Playlist */}
-          <Pressable
-            style={styles.auxBtn}
-            onPress={() => setAlbumModalVisible(true)}>
-            <Ionicons name="list" size={22} color={theme.textSecondary} />
+            hitSlop={8}
+            onPress={() => router.push('/queue' as any)}>
+            <View style={{ position: 'relative', alignItems: 'center', justifyContent: 'center' }}>
+              <Ionicons
+                name="list"
+                size={22}
+                color={manualQueue.length > 0 ? theme.tint : theme.textSecondary}
+              />
+              {manualQueue.length > 0 && (
+                <View
+                  style={{
+                    position: 'absolute',
+                    top: -4,
+                    right: -6,
+                    backgroundColor: theme.tint,
+                    borderRadius: 6,
+                    minWidth: 14,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    paddingHorizontal: 2,
+                  }}>
+                  <Text style={{ color: '#FFFFFF', fontSize: 9, fontWeight: '800' }}>
+                    {manualQueue.length}
+                  </Text>
+                </View>
+              )}
+            </View>
           </Pressable>
         </View>
       </View>
@@ -660,6 +768,14 @@ export default function PlayerScreen() {
         isPlaying={isPlaying}
         onClose={() => setActionSheetVisible(false)}
         onPlay={playVn}
+        onPlayNext={(v) => {
+          const res = playNext(v);
+          teddyReactionService.trigger('CUSTOM', res.message);
+        }}
+        onAddToQueue={(v) => {
+          const res = addToQueue(v);
+          teddyReactionService.trigger('CUSTOM', res.message);
+        }}
         onToggleLike={handleToggleLike}
         onTogglePin={handleTogglePin}
         onAddToAlbum={() => setAlbumModalVisible(true)}
@@ -953,12 +1069,12 @@ const styles = StyleSheet.create({
   controlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 40,
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
     marginVertical: 10,
   },
   skipBtn: {
-    padding: 12,
+    padding: 8,
     alignItems: 'center',
     justifyContent: 'center',
   },

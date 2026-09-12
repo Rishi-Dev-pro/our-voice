@@ -16,7 +16,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 
 import { vnRepository } from '@/database/repositories/vnRepository';
 import { VN } from '@/types/vn';
-import { useAudio } from '@/services/audioPlayerContext';
+import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
 import { MiniPlayer } from '@/components/mini-player';
 import { AddToAlbumModal } from '@/components/add-to-album-modal';
@@ -103,17 +103,30 @@ export default function LikedScreen() {
     }
   }
 
+  const likedContext: PlaybackContext = useMemo(
+    () => ({
+      type: 'liked',
+      title: 'Favorites',
+      items: filteredVns,
+    }),
+    [filteredVns]
+  );
+
   function handlePlayAll() {
     if (filteredVns.length > 0) {
-      playVn(filteredVns[0]);
+      playVn(filteredVns[0], 0, likedContext);
     }
   }
 
   function handleShufflePlay() {
     if (filteredVns.length > 0) {
       const randomIndex = Math.floor(Math.random() * filteredVns.length);
-      playVn(filteredVns[randomIndex]);
+      playVn(filteredVns[randomIndex], 0, likedContext);
     }
+  }
+
+  function handlePlayTrack(track: VN) {
+    playVn(track, 0, likedContext);
   }
 
   return (
@@ -226,11 +239,14 @@ export default function LikedScreen() {
               vn={item}
               trackNumber={index + 1}
               isPlaying={currentVn?.id === item.id && isPlaying}
-              onPlay={playVn}
+              onPlay={handlePlayTrack}
               onToggleLike={handleToggleLike}
               onTogglePin={handleTogglePin}
               onAddToAlbum={(vn) => setAlbumModalVn(vn)}
-              onPress={(vn) => router.push(`/player/${vn.id}` as any)}
+              onPress={(vn) => {
+                handlePlayTrack(vn);
+                router.push(`/player/${vn.id}` as any);
+              }}
             />
           )}
         />

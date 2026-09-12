@@ -18,7 +18,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { albumRepository } from '@/database/repositories/albumRepository';
 import { vnRepository } from '@/database/repositories/vnRepository';
 import { Album, VN } from '@/types/vn';
-import { useAudio } from '@/services/audioPlayerContext';
+import { useAudio, PlaybackContext } from '@/services/audioPlayerContext';
 import { VnItem } from '@/components/vn-item';
 import { MiniPlayer } from '@/components/mini-player';
 import { AppleArtwork } from '@/components/apple-artwork';
@@ -73,7 +73,7 @@ export default function AlbumDetailScreen() {
       const unassigned = allVns.filter((v) => !currentIds.has(v.id));
       setAvailableVns(unassigned);
       setAddModalVisible(true);
-    } catch (err) {
+    } catch {
       Alert.alert('Error', 'Could not load library voice notes.');
     }
   }
@@ -126,7 +126,7 @@ export default function AlbumDetailScreen() {
       await vnRepository.toggleLike(vn.id, nextState);
       DeviceEventEmitter.emit('library_updated');
       teddyReactionService.trigger(nextState ? 'LIKE' : 'UNLIKE');
-    } catch (err) {
+    } catch {
       await loadData();
       if (currentVn?.id === vn.id) {
         updateCurrentVnMetadata({ isLiked: !nextState });
@@ -146,7 +146,7 @@ export default function AlbumDetailScreen() {
       await vnRepository.togglePin(vn.id, nextState);
       DeviceEventEmitter.emit('library_updated');
       teddyReactionService.trigger(nextState ? 'PIN' : 'UNPIN');
-    } catch (err) {
+    } catch {
       await loadData();
       if (currentVn?.id === vn.id) {
         updateCurrentVnMetadata({ isPinned: !nextState });
@@ -154,10 +154,18 @@ export default function AlbumDetailScreen() {
     }
   }
 
+  // Playback Context for this Album
+  const albumContext: PlaybackContext = {
+    type: 'album',
+    id: albumId,
+    title: album?.name || 'Album',
+    items: vns,
+  };
+
   // Apple Music "Play All" Action
   function handlePlayAll() {
     if (vns.length > 0) {
-      playVn(vns[0]);
+      playVn(vns[0], 0, albumContext);
     }
   }
 
@@ -165,8 +173,12 @@ export default function AlbumDetailScreen() {
   function handleShufflePlay() {
     if (vns.length > 0) {
       const randomIndex = Math.floor(Math.random() * vns.length);
-      playVn(vns[randomIndex]);
+      playVn(vns[randomIndex], 0, albumContext);
     }
+  }
+
+  function handlePlayTrack(track: VN) {
+    playVn(track, 0, albumContext);
   }
 
   return (
@@ -276,11 +288,14 @@ export default function AlbumDetailScreen() {
               vn={item}
               trackNumber={index + 1}
               isPlaying={currentVn?.id === item.id && isPlaying}
-              onPlay={playVn}
+              onPlay={handlePlayTrack}
               onToggleLike={handleToggleLike}
               onTogglePin={handleTogglePin}
               onRemoveFromAlbum={handleRemoveVn}
-              onPress={(vn) => router.push(`/player/${vn.id}` as any)}
+              onPress={(vn) => {
+                handlePlayTrack(vn);
+                router.push(`/player/${vn.id}` as any);
+              }}
             />
           )}
         />
@@ -303,7 +318,9 @@ export default function AlbumDetailScreen() {
             ]}
             onPress={(e) => e.stopPropagation()}>
             <View style={styles.dragHandle} />
-            <Text style={[styles.modalTitle, { color: theme.text }]}>Add to "{album?.name}"</Text>
+            <Text style={[styles.modalTitle, { color: theme.text }]}>
+              {`Add to "${album?.name ?? ''}"`}
+            </Text>
             <Text style={[styles.modalSubtitle, { color: theme.textSecondary }]}>
               Select recordings from your library:
             </Text>

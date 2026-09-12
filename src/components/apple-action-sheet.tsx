@@ -18,6 +18,8 @@ interface AppleActionSheetProps {
   isPlaying?: boolean;
   onClose: () => void;
   onPlay: (vn: VN) => void;
+  onPlayNext?: (vn: VN) => void;
+  onAddToQueue?: (vn: VN) => void;
   onToggleLike: (vn: VN) => void;
   onTogglePin?: (vn: VN) => void;
   onAddToAlbum?: (vn: VN) => void;
@@ -33,6 +35,8 @@ export function AppleActionSheet({
   isPlaying = false,
   onClose,
   onPlay,
+  onPlayNext,
+  onAddToQueue,
   onToggleLike,
   onTogglePin,
   onAddToAlbum,
@@ -93,6 +97,44 @@ export function AppleActionSheet({
                 color={theme.tint}
               />
             </Pressable>
+
+            {/* Play Next */}
+            {onPlayNext && (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.actionRow,
+                  { borderBottomColor: theme.separator },
+                  pressed && { backgroundColor: theme.backgroundSelected },
+                ]}
+                onPress={() => {
+                  onClose();
+                  setTimeout(() => {
+                    onPlayNext(vn);
+                  }, 120);
+                }}>
+                <Text style={[styles.actionLabel, { color: theme.text }]}>Play Next</Text>
+                <Ionicons name="play-skip-forward-outline" size={20} color={theme.tint} />
+              </Pressable>
+            )}
+
+            {/* Add to Queue */}
+            {onAddToQueue && (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.actionRow,
+                  { borderBottomColor: theme.separator },
+                  pressed && { backgroundColor: theme.backgroundSelected },
+                ]}
+                onPress={() => {
+                  onClose();
+                  setTimeout(() => {
+                    onAddToQueue(vn);
+                  }, 120);
+                }}>
+                <Text style={[styles.actionLabel, { color: theme.text }]}>Add to Queue</Text>
+                <Ionicons name="list-outline" size={20} color={theme.text} />
+              </Pressable>
+            )}
 
             {/* Favorite / Unfavorite */}
             <Pressable

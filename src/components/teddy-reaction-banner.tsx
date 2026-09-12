@@ -48,7 +48,7 @@ export function TeddyReactionBanner() {
       }
     });
     scale.value = withTiming(0.9, { duration: 200 });
-  }, [opacity, scale, translateY]);
+  }, []);
 
   useEffect(() => {
     // 1. Show listener
@@ -94,7 +94,7 @@ export function TeddyReactionBanner() {
         clearTimeout(dismissTimerRef.current);
       }
     };
-  }, [dismissReaction, opacity, scale, translateY]);
+  }, [dismissReaction]);
 
   if (!currentReaction) {
     return null;

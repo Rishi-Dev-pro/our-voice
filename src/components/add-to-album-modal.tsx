@@ -28,23 +28,29 @@ export function AddToAlbumModal({ vn, visible, onClose }: AddToAlbumModalProps) 
   const [newAlbumName, setNewAlbumName] = useState('');
   const theme = useTheme();
 
-  useEffect(() => {
-    if (visible && vn) {
-      loadAlbums();
-    } else {
-      setShowCreateInput(false);
-      setNewAlbumName('');
-    }
-  }, [visible, vn]);
+  const handleClose = () => {
+    setShowCreateInput(false);
+    setNewAlbumName('');
+    onClose();
+  };
 
-  async function loadAlbums() {
-    try {
-      const list = await albumRepository.getAllAlbums();
-      setAlbums(list);
-    } catch (err) {
-      console.warn('Error loading albums:', err);
+  useEffect(() => {
+    let isMounted = true;
+    if (visible && vn) {
+      albumRepository.getAllAlbums()
+        .then((list) => {
+          if (isMounted) {
+            setAlbums(list);
+          }
+        })
+        .catch((err) => {
+          console.warn('Error loading albums:', err);
+        });
     }
-  }
+    return () => {
+      isMounted = false;
+    };
+  }, [visible, vn]);
 
   async function handleSelectAlbum(album: Album) {
     if (!vn) return;
@@ -52,7 +58,7 @@ export function AddToAlbumModal({ vn, visible, onClose }: AddToAlbumModalProps) 
       await albumRepository.addVnToAlbum(album.id, vn.id);
       DeviceEventEmitter.emit('library_updated');
       Alert.alert('Added', `"${vn.title}" added to "${album.name}".`);
-      onClose();
+      handleClose();
     } catch (err: any) {
       Alert.alert('Error', err?.message || 'Could not add to album.');
     }
@@ -71,15 +77,15 @@ export function AddToAlbumModal({ vn, visible, onClose }: AddToAlbumModalProps) 
       await albumRepository.addVnToAlbum(created.id, vn.id);
       DeviceEventEmitter.emit('library_updated');
       Alert.alert('Success', `Created "${created.name}" and added "${vn.title}".`);
-      onClose();
+      handleClose();
     } catch (err: any) {
       Alert.alert('Error', err?.message || 'Could not create album.');
     }
   }
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={onClose}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
+      <Pressable style={styles.backdrop} onPress={handleClose}>
         <Pressable
           style={[
             styles.modalCard,
@@ -179,7 +185,7 @@ export function AddToAlbumModal({ vn, visible, onClose }: AddToAlbumModalProps) 
               { backgroundColor: theme.card },
               pressed && { opacity: 0.8 },
             ]}
-            onPress={onClose}>
+            onPress={handleClose}>
             <Text style={[styles.cancelText, { color: theme.text }]}>Cancel</Text>
           </Pressable>
         </Pressable>
